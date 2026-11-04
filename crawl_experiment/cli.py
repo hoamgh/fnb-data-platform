@@ -9,11 +9,15 @@ from .browser.browser_factory import BrowserFactory
 from .core.models import Store
 from .orchestration.crawlee_adapter import CrawleeAdapter
 from .sources.google_maps.crawler import GoogleMapsCrawler
+from .sources.google_maps.navigator import GoogleMapsNavigator
 from .storage.checkpoint_repository import CheckpointRepository
 from .storage.review_repository import ReviewRepository
+from .storage.parquet_review_writer import ParquetReviewWriter
+from datetime import datetime, timezone
 
 DEFAULT_MANIFEST = "config/known_coles_stores.json"
-DEFAULT_DATABASE = "data/reviews.sqlite3"
+DEFAULT_DATABASE = "data/state/crawler_state.sqlite3"
+DEFAULT_PARQUET_ROOT = "data/lake/google_maps_reviews"
 DEFAULT_CHECKPOINT_DIRECTORY = "data/checkpoints"
 MAX_CONCURRENCY = 10
 
@@ -22,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Modular Google Maps review crawler")
     parser.add_argument("--manifest", default=DEFAULT_MANIFEST)
     parser.add_argument("--database", default=DEFAULT_DATABASE)
+    parser.add_argument("--parquet-root", default=DEFAULT_PARQUET_ROOT)
+    parser.add_argument("--run-id")
     parser.add_argument("--checkpoints", default=DEFAULT_CHECKPOINT_DIRECTORY)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--headed", action="store_true")
@@ -43,16 +49,26 @@ def load_stores(path: str | Path) -> list[Store]:
 
 
 async def run(args: argparse.Namespace) -> None:
-    review_repository = ReviewRepository(args.database)
+    now = datetime.now(timezone.utc)
+    run_id = args.run_id or now.strftime("%Y%m%d-%H%M%S")
+    writer = ParquetReviewWriter(args.parquet_root, run_id, now.date().isoformat())
+    review_repository = ReviewRepository(
+        args.database, run_id=run_id, parquet_writer=writer
+    )
     try:
         crawler = GoogleMapsCrawler(
             review_repository,
             CheckpointRepository(args.checkpoints),
+            run_id=run_id,
         )
+        def crawl_without_warm_up(store, driver):
+            return crawler.crawl(store, driver, warm_up=False)
+
         adapter = CrawleeAdapter(
             BrowserFactory(headless=not args.headed),
-            crawler.crawl,
+            crawl_without_warm_up,
             max_concurrency=args.concurrency,
+            browser_warm_up=lambda driver: GoogleMapsNavigator(driver).warm_up(),
         )
         await adapter.run(load_stores(args.manifest))
         print(json.dumps([result.__dict__ for result in adapter.results], indent=2, default=str))

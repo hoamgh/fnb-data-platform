@@ -1,3 +1,4 @@
+- GOOGLE DOM FOLLOW-UP 2026-11-04: completed run `output/google-eight-20261104-230831-609/summary.json` supersedes the earlier smoke-ready checkpoint below. VERIFIED from summary: 4-worker startup/reuse/cleanup and 262 persisted review rows across 7 files; 3 full, 4 deliberately scroll-limited, 1 unresolved; acceptance_pass=false. No final identity/coverage sign-off or new tests in this documentation update. NEXT: inspect unresolved job, validate seven selected branches, then reconcile current code/offline tests with remaining findings. Details: [Google crawler QA](GOOGLE_CRAWLER_V1_QA.md#eight-store--four-worker-dom-result-2026-11-04). PRE-COMMIT VERIFIED: 227 focused Google tests PASS (2 existing optional dependency warnings); fresh basetemp avoids default-temp access error.
 # Current task — M1.1 Offline OSM Source Adapter
 
 State: IMPLEMENTED_AND_LOCALLY_VERIFIED; local seven-file commit approved.

@@ -1,9 +1,11 @@
 import logging
 import re
 import time
+import unicodedata
 from enum import StrEnum
 
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import ElementClickInterceptedException
 
 from crawl_experiment.core.errors import (
     AuthRequiredError,
@@ -18,8 +20,12 @@ logger = logging.getLogger(__name__)
 
 SORT_BUTTON_FALLBACKS = (
     "div[role='main'] button[aria-label*='Sort' i]",
+    "div[role='main'] button[jsaction*='sort' i]",
+    "div[role='main'] [role='button'][aria-label*='Sắp xếp' i]",
+    "div[role='main'] [role='button'][aria-label*='Sort' i]",
     "div[role='main'] [data-review-id] button[aria-haspopup='true']",
     "div[role='main'] button[aria-haspopup='true']",
+    "div[role='main'] button, div[role='main'] [role='button']",
     "button[aria-label*='Sort' i]",
     "button[aria-haspopup='true']",
 )
@@ -39,18 +45,27 @@ SORT_OPTION_FALLBACKS = (
 )
 AUTH_DIALOG_SELECTOR = "[role='dialog'], [aria-modal='true']"
 MAIN_SURFACE_SELECTOR = "[role='main']"
-AUTH_REVIEW_TERMS = ("review", "sort", "continue", "account")
+AUTH_REVIEW_TERMS = (
+    "review", "sort", "continue", "account", "đánh giá", "sắp xếp", "tiếp tục", "tài khoản",
+)
 LIMITED_REVIEW_TERMS = (
     "limited review view",
     "limited view",
     "some reviews aren't available",
     "some reviews are not available",
     "sign in to see all reviews",
+    "đăng nhập để xem tất cả bài đánh giá",
+    "đăng nhập để xem thêm bài đánh giá",
+    "một số bài đánh giá không có sẵn",
 )
 NO_REVIEWS_TERMS = (
     "no reviews",
     "no reviews yet",
     "be the first to review",
+    "chưa có bài đánh giá",
+    "chưa có đánh giá",
+    "không có bài đánh giá nào",
+    "hãy là người đầu tiên đánh giá",
 )
 
 
@@ -63,7 +78,7 @@ class ReviewSurfaceState(StrEnum):
 
 
 def _normalized(value: str | None) -> str:
-    return " ".join((value or "").split()).casefold()
+    return unicodedata.normalize("NFC", " ".join((value or "").split()).casefold())
 
 
 def _menu_item_details(element) -> dict[str, object]:
@@ -161,6 +176,8 @@ class ReviewSurface:
                 raise ReviewSurfaceError("Reviews tab not found")
             selected = _normalized(buttons[0].get_attribute("aria-selected")) == "true"
             if not selected:
+                self._scroll_into_view(buttons[0])
+                self._wait_until_control_stable(buttons[0])
                 buttons[0].click()
             else:
                 logger.info("Reviews tab already selected; reacquiring pane without click")
@@ -168,7 +185,9 @@ class ReviewSurface:
         except ReviewSurfaceError:
             raise
         except Exception as exc:
-            raise ReviewSurfaceError(str(exc).splitlines()[0]) from exc
+            error = ReviewSurfaceError(str(exc).splitlines()[0])
+            error.local_review_tab_click_intercepted = isinstance(exc, ElementClickInterceptedException)
+            raise error from exc
 
     def prepare_and_classify(self):
         """Open Reviews when possible, then classify before sort is attempted."""
@@ -189,6 +208,8 @@ class ReviewSurface:
         except ReviewSurfaceError as exc:
             state, evidence = self.classify_state()
             evidence["open_error"] = str(exc).splitlines()[0]
+            if getattr(exc, 'local_review_tab_click_intercepted', False):
+                evidence['open_error_code'] = 'REVIEW_TAB_CLICK_INTERCEPTED'
             logger.info(
                 "Review surface classified state=%s evidence=%s", state, evidence
             )
@@ -210,7 +231,7 @@ class ReviewSurface:
         auth_evidence = [
             text
             for text in auth_texts
-            if "sign in" in text
+            if ("sign in" in text or "đăng nhập" in text)
             and any(term in text for term in AUTH_REVIEW_TERMS)
         ]
         main_text = " ".join(
@@ -488,13 +509,24 @@ class ReviewSurface:
 
     @staticmethod
     def _is_sort_labeled(button) -> bool:
-        label = _normalized(button.get_attribute("aria-label"))
-        if any(token in label for token in NEGATIVE_BUTTON_LABELS):
-            return False
-        return any(
-            token in label
-            for token in ("sort", "sắp xếp", "trier", "orden", "sortieren")
+        labels = " ".join(
+            _normalized(value)
+            for value in (
+                button.get_attribute("aria-label"),
+                button.get_attribute("title"),
+                button.get_attribute("data-tooltip"),
+                button.get_attribute("data-value"),
+                getattr(button, "text", ""),
+            )
+            if value
         )
+        if any(term in labels for term in (
+            "sort", "sắp xếp", "trier", "orden", "sortieren",
+            "mới nhất", "phù hợp nhất", "liên quan nhất",
+        )):
+            return True
+        jsaction = _normalized(button.get_attribute("jsaction"))
+        return "sort" in jsaction and "review" in jsaction
 
     @staticmethod
     def _button_is_viable(button) -> bool:
@@ -712,10 +744,24 @@ class ReviewSurface:
     @staticmethod
     def _relative_age_seconds(label):
         text = _normalized(label)
-        if text in {"just now", "today"}:
+        if text in {"just now", "today", "vừa xong", "hôm nay"}:
             return 0
-        if text == "yesterday":
+        if text in {"yesterday", "hôm qua"}:
             return 86400
+        vietnamese = re.fullmatch(
+            r"(?:(\d+)|một)\s+(phút|giờ|ngày|tuần|tháng|năm)\s+trước",
+            text,
+        )
+        if vietnamese:
+            amount = int(vietnamese.group(1)) if vietnamese.group(1) else 1
+            return amount * {
+                "phút": 60,
+                "giờ": 3600,
+                "ngày": 86400,
+                "tuần": 7 * 86400,
+                "tháng": 30 * 86400,
+                "năm": 365 * 86400,
+            }[vietnamese.group(2)]
         match = re.fullmatch(
             r"(?:(\d+)|a|an|one)\s+"
             r"(minute|hour|day|week|month|year)s?\s+ago",
@@ -763,9 +809,10 @@ class ReviewSurface:
                         getattr(button, "text", ""),
                     ),
                 )
-            ).casefold()
+            )
         except Exception:  # noqa: BLE001 - control may rerender
             return False
+        state = _normalized(state)
         return any(target in state for target in newest_labels)
 
     def _interactive_sort_control_confirmed(self, button) -> bool:

@@ -64,7 +64,7 @@ class AccessPolicy:
                 decision.job_status='DEFERRED_LIMITED'
             elif state=='UNKNOWN':
                 row['consecutive_unknown_count']+=1
-                if session_counts.get(state,0)==0:
+                if session_counts.get(state,0)<self.config.max_browser_retries:
                     decision.retry_fresh=True
                     return
                 n=row['consecutive_unknown_count']

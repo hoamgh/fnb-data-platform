@@ -7,7 +7,7 @@ from typing import Any
 
 from crawl_experiment.browser.browser_factory import BrowserFactory
 from crawl_experiment.browser.session_manager import BrowserSessionManager
-from crawl_experiment.core.errors import BrowserSessionError, ChallengeError, LimitedReviewViewError, LimitedViewError, ReviewSurfaceError, ReviewParseError, NavigationError, PlaceResolutionError, CrawlError
+from crawl_experiment.core.errors import BrowserSessionError, ChallengeError, AuthRequiredError, RateLimitedError, LimitedReviewViewError, LimitedViewError, ReviewSurfaceError, ReviewParseError, NavigationError, PlaceResolutionError, CrawlError
 from crawl_experiment.core.statuses import CrawlStatus
 from crawl_experiment.core.models import CrawlResult, Store
 
@@ -30,6 +30,7 @@ class CrawleeAdapter:
         retry_policy: RetryPolicy | None = None,
         *,
         max_concurrency: int = 1,
+        browser_session_manager: BrowserSessionManager | None = None,
         on_attempt: Callable[[Store, int], None] | None = None,
         on_result: Callable[[Store, CrawlResult, int], None] | None = None,
         on_terminal_failure: Callable[[Store, Any, int, Exception], None] | None = None,
@@ -44,6 +45,7 @@ class CrawleeAdapter:
         self.crawl_one = crawl_one
         self.retry_policy = retry_policy or RetryPolicy()
         self.max_concurrency = max_concurrency
+        self.browser_session_manager = browser_session_manager
         self.on_attempt = on_attempt
         self.on_result = on_result
         self.on_terminal_failure = on_terminal_failure
@@ -71,13 +73,15 @@ class CrawleeAdapter:
         stores_by_id = {store.id: store for store in stores}
         if self.work_provider and stores:
             raise ValueError("Use either static stores or a dynamic work_provider, not both")
-        browsers = BrowserSessionManager(
-            self.browser_factory,
-            warm_up=self.browser_warm_up,
-            logger=logger,
-            event_observer=self.event_observer,
-            worker_id=self.worker_id,
+        owns_browser = self.browser_session_manager is None
+        browsers = self.browser_session_manager or BrowserSessionManager(
+            self.browser_factory, warm_up=self.browser_warm_up, logger=logger,
+            event_observer=self.event_observer, worker_id=self.worker_id,
         )
+        if browsers.browser_factory is not self.browser_factory:
+            raise ValueError('BrowserFactory must match BrowserSessionManager owner')
+        if self.browser_warm_up is not None:
+            browsers.warm_up = self.browser_warm_up
         job_terminal = False
         failure_counts={}
         async def handle(context: Any) -> None:
@@ -124,7 +128,9 @@ class CrawleeAdapter:
                 decision = self.retry_policy.decide(exc, attempt)
                 if policy:
                     state=None
-                    if isinstance(exc,(LimitedReviewViewError,LimitedViewError)):
+                    if isinstance(exc,(AuthRequiredError,ChallengeError,RateLimitedError)):
+                        pass  # Terminal access decisions must never become fresh-session retries.
+                    elif isinstance(exc,(LimitedReviewViewError,LimitedViewError)):
                         state='LIMITED'
                     elif isinstance(exc,ReviewSurfaceError) and 'state UNKNOWN:' in str(exc):
                         state='UNKNOWN'
@@ -204,7 +210,7 @@ class CrawleeAdapter:
                 request_manager=queue,
                 request_handler=handle,
                 max_request_retries=max(
-                    (1+self.access_policy.config.max_browser_retries+self.access_policy.config.max_runtime_retries) if self.access_policy else 0,
+                    (2*self.access_policy.config.max_browser_retries+self.access_policy.config.max_runtime_retries) if self.access_policy else 0,
                     self.retry_policy.max_session_retries,
                     self.retry_policy.max_navigation_retries,
                     self.retry_policy.max_surface_retries,
@@ -244,7 +250,8 @@ class CrawleeAdapter:
                 self._observe(dict(event="worker_finished_job", store_id=store.id))
             return statistics
         finally:
-            browsers.close()
+            if owns_browser:
+                browsers.close()
             self.lifecycle_summary = browsers.summary()
 
     def _observe(self, event: dict[str, Any]) -> None:

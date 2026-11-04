@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from crawl_experiment.browser.browser_factory import BrowserFactory
+from crawl_experiment.browser.session_manager import BrowserSessionManager
 from crawl_experiment.core.models import Store
 from crawl_experiment.observability.metrics import CrawlMetrics
 from crawl_experiment.observability.run_artifacts import (
@@ -82,6 +83,11 @@ async def _run_crawl(
     timeout_seconds: float,
     max_scrolls: int,
     concurrency: int,
+    browser_factory: BrowserFactory | None = None,
+    retry_policy: Any = None,
+    access_policy_factory: Any = None,
+    browser_session_manager: BrowserSessionManager | None = None,
+    review_source: str = 'dom',
     access_policy_config: AccessPolicyConfig | None = None,
     crawl_mode: str = 'REVIEW_FULL',
     incremental_config: IncrementalConfig | None = None,
@@ -91,7 +97,7 @@ async def _run_crawl(
     writer = ParquetReviewWriter(parquet_root, run_directory.name, started_at[:10])
     reviews = ReviewRepository(state_database, run_id=run_directory.name, parquet_writer=writer)
     access_repository=PlaceAccessRepository(state_database)
-    access_policy=AccessPolicy(access_repository,access_policy_config)
+    access_policy=(access_policy_factory or AccessPolicy)(access_repository,access_policy_config)
     incremental_results={}
     try:
         def activity(event,details):
@@ -141,9 +147,11 @@ async def _run_crawl(
             crawler.mark_browser_warm_up_completed()
 
         adapter = CrawleeAdapter(
-            BrowserFactory(headless=False),
+            browser_factory or BrowserFactory(headless=False),
             crawl_newest,
+            retry_policy=retry_policy,
             max_concurrency=concurrency,
+            browser_session_manager=browser_session_manager,
             on_attempt=artifacts.on_attempt,
             on_result=artifacts.on_result,
             on_terminal_failure=artifacts.on_terminal_failure,
@@ -179,6 +187,12 @@ def run_full_crawl(
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     max_scrolls: int = DEFAULT_MAX_SCROLLS,
     concurrency: int = DEFAULT_CONCURRENCY,
+    browser_factory: BrowserFactory | None = None,
+    retry_policy: Any = None,
+    access_policy_factory: Any = None,
+    async_runner: asyncio.Runner | None = None,
+    browser_session_manager: BrowserSessionManager | None = None,
+    review_source: str = 'dom',
     validation_mode: bool = False,
     runner_name: str = "scripts.coles_small_set_full_crawl",
     access_policy_config: AccessPolicyConfig | None = None,
@@ -197,6 +211,11 @@ def run_full_crawl(
         raise ValueError("max_scrolls must be positive")
     if concurrency <= 0:
         raise ValueError("concurrency must be positive")
+    if review_source != 'dom':
+        raise ValueError("Current crawler supports only 'dom' review source")
+    if (browser_session_manager is not None and browser_factory is not None and
+            browser_session_manager.browser_factory is not browser_factory):
+        raise ValueError('BrowserFactory must match BrowserSessionManager owner')
     run_directory = create_run_directory(output_root)
     logger = configure_logging(run_directory / "progress.log")
     started_at = utc_now()
@@ -214,8 +233,7 @@ def run_full_crawl(
     runner_error = None
     exit_code = 0
     try:
-        asyncio.run(
-            _run_crawl(
+        crawl = _run_crawl(
                 run_directory,
                 logger,
                 artifacts,
@@ -226,12 +244,17 @@ def run_full_crawl(
                 timeout_seconds=timeout_seconds,
                 max_scrolls=max_scrolls,
                 concurrency=concurrency,
+                browser_factory=browser_factory,
+                retry_policy=retry_policy,
+                access_policy_factory=access_policy_factory,
+                browser_session_manager=browser_session_manager,
+                review_source=review_source,
                 access_policy_config=access_policy_config,
                 crawl_mode=crawl_mode,
                 incremental_config=incremental_config,
                 reconciliation_config=reconciliation_config,
             )
-        )
+        (async_runner.run(crawl) if async_runner is not None else asyncio.run(crawl))
     except Exception as exc:  # noqa: BLE001 - final artifact must survive runner failure
         runner_error = f"{type(exc).__name__}: {exc}"
         logger.exception("Full-crawl runner failed")

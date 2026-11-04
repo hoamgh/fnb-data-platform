@@ -69,7 +69,10 @@ class ParquetReviewWriter:
         if target.exists():
             import pyarrow.parquet as pq
 
-            metadata = pq.ParquetFile(target).metadata.metadata or {}
+            existing = pq.ParquetFile(target)
+            if existing.metadata.num_rows != len(event_ids):
+                raise RuntimeError(f'Parquet batch row count mismatch: {target}')
+            metadata = existing.metadata.metadata or {}
             persisted_ids = json.loads(metadata.get(b"review_event_ids", b"[]"))
             if persisted_ids != event_ids:
                 raise RuntimeError(f"Parquet batch filename collision: {target}")

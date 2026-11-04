@@ -124,6 +124,29 @@ class CrawlArtifacts:
         return max(0.0, now - self._store_starts.get(store_id, now))
 
     def on_activity(self, event: str, details: dict[str, Any]) -> None:
+        if event in {"place_details", "place_details_capture_failed"}:
+            store_id = details.get("store_id")
+            store = next((item for item in self.stores if item.id == store_id), None)
+            if store is None:
+                return
+            if event == "place_details_capture_failed":
+                self._write_store(store, google_place_details_error=details.get("google_place_details_error"))
+                return
+            snapshot = details.get("google_place_details")
+            if not isinstance(snapshot, dict) or snapshot.get("store_id") != store_id:
+                raise ValueError("Google place details must match resolved store identity")
+            if snapshot.get('schema_version') == 2 and read_json(self._path(store)).get('place_entity_confirmed') is not True:
+                raise ValueError('Place metadata requires confirmed place identity')
+            sidecar = self.run_directory / "metadata" / f"{store_id}.place_details.json"
+            write_json(sidecar, snapshot)
+            self._write_store(store, google_place_details_path=str(sidecar),
+                              google_place_details_error=None,
+                              google_place_details_collected_at=snapshot.get("collected_at"),
+                              google_place_details_field_count=sum(
+                                  value is not None for key, value in snapshot.items()
+                                  if key in {"name", "address", "category", "phone", "website", "menu_url", "opening_hours", "rating", "review_count", "price_range", "plus_code"}
+                              ))
+            return
         if event not in {
             "search_phase_timing", "place_resolution", "review_access_after_entity_open"
         }:
@@ -340,6 +363,9 @@ def build_summary(
                 "resolved_place_address": metadata.get("resolved_place_address"),
                 "resolved_url": metadata.get("resolved_url"),
                 "place_entity_confirmed": metadata.get("place_entity_confirmed", False),
+                "google_place_details_path": metadata.get("google_place_details_path"),
+                "google_place_details_field_count": metadata.get("google_place_details_field_count", 0),
+                "google_place_details_error": metadata.get("google_place_details_error"),
                 "access_state_after_place_resolution": metadata.get(
                     "access_state_after_place_resolution"
                 ),

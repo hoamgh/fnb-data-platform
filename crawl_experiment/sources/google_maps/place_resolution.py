@@ -68,7 +68,8 @@ def resolve_place(place: CanonicalPlace, driver: Any) -> ResolutionResult:
     query = " ".join(filter(None, [place.name, place.address, place.admin_area_name]))
     error = None
     try:
-        navigator.open_store(Store(id=store_id(place), name=place.name, query=query))
+        navigator.open_store(Store(id=store_id(place), name=place.name, query=query,
+                                   expected_address=place.address))
     except PlaceResolutionError as exc:
         error = str(exc).splitlines()[0]
     row = assess_resolution(place, navigator.last_resolution_diagnostics)

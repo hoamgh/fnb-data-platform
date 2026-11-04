@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
+from difflib import SequenceMatcher
 import time
 from enum import StrEnum
 from urllib.parse import quote_plus
@@ -183,38 +185,68 @@ class GoogleMapsNavigator:
     def _best_exact_candidate(
         self, store: Store, candidates: list[dict[str, object]]
     ) -> dict[str, object] | None:
-        target = self._normalized(store.name)
-        matches = [
-            candidate
-            for candidate in candidates
-            if self._normalized(str(candidate["text"])) == target
-        ]
-        if store.expected_address:
-            addressed = [
-                candidate
-                for candidate in matches
-                if self._address_matches(
-                    store.expected_address, str(candidate.get("address") or "")
-                )
-            ]
-            if addressed:
-                return addressed[0]
-            if any(candidate.get("address") for candidate in matches):
-                return None
-        return matches[0] if matches else None
+        matches = [candidate for candidate in candidates
+                   if self._name_match(store.name, str(candidate['text'])) is not None]
+        if not store.expected_address:
+            return None
+        addressed = [candidate for candidate in matches
+                     if self._address_matches(store.expected_address,
+                                              str(candidate.get("address") or ""))]
+        return addressed[0] if len(addressed) == 1 else None
+
+    @staticmethod
+    def _identity_text(value: str | None) -> str:
+        text = unicodedata.normalize('NFKD', (value or '').casefold().replace('đ', 'd'))
+        return ''.join(char for char in text if not unicodedata.combining(char))
+
+    def _name_match(self, expected: str | None, actual: str | None) -> str | None:
+        left = re.findall(r'[a-z0-9]+', self._identity_text(expected))
+        right = re.findall(r'[a-z0-9]+', self._identity_text(actual))
+        if not left or not right:
+            return None
+        if left == right:
+            return 'EXACT'
+        a, b = ''.join(left), ''.join(right)
+        if a == b:
+            return 'SPACING_VARIANT'
+        # Similar spellings must not erase numbered branch/name conflicts.
+        numbers_a, numbers_b = set(re.findall(r'\d+', a)), set(re.findall(r'\d+', b))
+        if numbers_a and numbers_b and numbers_a != numbers_b:
+            return None
+        short, long = sorted((left, right), key=len)
+        generic = {'quan', 'an', 'tiem', 'nha', 'hang', 'cafe', 'coffee', 'tra', 'sua',
+                   'banh', 'mi', 'oc', 'pizza', 'restaurant', 'shop', 'store'}
+        distinctive = [token for token in short if token not in generic and not token.isdigit()]
+        if long[:len(short)] == short and distinctive:
+            if len(short) >= 2 or len(short[0]) >= 6:
+                return 'NAME_WITH_QUALIFIER'
+        if min(len(a), len(b)) >= 8 and SequenceMatcher(None, a, b).ratio() >= 0.94:
+            return 'HIGH_SIMILARITY'
+        return None
 
     def _address_matches(self, expected: str, actual: str) -> bool:
-        expected_normalized = self._normalized(expected)
-        actual_normalized = self._normalized(actual)
-        return bool(
-            expected_normalized
-            and actual_normalized
-            and (
-                expected_normalized == actual_normalized
-                or expected_normalized in actual_normalized
-                or actual_normalized in expected_normalized
-            )
-        )
+        # Require a numbered street, comparing whole components. Locality-only
+        # fallback addresses cannot identify a branch.
+        def components(value):
+            text = self._identity_text(value).split(',', 1)[0]
+            text = re.sub(r'\s+-\s+(?:phuong|quan|ward|district)\b.*$', '', text)
+            normalized = " ".join(re.findall(r"[a-z0-9/]+", text))
+            normalized = re.sub(r"^(?:address|dia chi)\s+", "", normalized)
+            tokens = normalized.split()
+            number = re.match(r"^(\d+[a-z]?(?:/\d+[a-z]?)*)(?:\s+|$)", normalized)
+            if not number or len(tokens) < 2:
+                return None
+            street = tokens[1:]
+            if street and street[0] in {'d', 'duong'}:
+                street = street[1:]
+            return (number.group(1), street) if street else None
+
+        left, right = components(expected), components(actual)
+        if left is None or right is None or left[0] != right[0]:
+            return False
+        # Compare the complete street component; comma-separated locality
+        # suffixes do not substitute for branch evidence.
+        return left[1] == right[1]
 
     def _resolved_place(
         self,
@@ -225,10 +257,11 @@ class GoogleMapsNavigator:
     ) -> dict[str, object] | None:
         title = self._place_title()
         address = self._place_address()
-        title_matches = self._normalized(title) == self._normalized(store.name)
+        name_match = self._name_match(store.name, title)
+        title_matches = name_match is not None
         address_matches = (
-            not store.expected_address
-            or self._address_matches(store.expected_address, address or "")
+            bool(store.expected_address)
+            and self._address_matches(store.expected_address, address or "")
         )
         canonical_place_url = "/maps/place/" in (current_url or "").casefold()
         detail_pane = bool(
@@ -242,11 +275,18 @@ class GoogleMapsNavigator:
             return None
         if not canonical_place_url:
             return None
+        # A direct entity page does not remove ambiguity in a visible candidate list.
+        if len([candidate for candidate in candidates
+                if self._name_match(store.name, str(candidate.get('text') or '')) is not None
+                and self._address_matches(store.expected_address or '', str(candidate.get('address') or ''))]) > 1:
+            return None
         return {
             "resolved_place_title": title,
             "resolved_place_address": address,
             "resolved_url": current_url,
             "place_entity_confirmed": True,
+            "identity_name_match": name_match,
+            "identity_address_match": True,
         }
 
     def _page_evidence(self) -> PageEvidence:

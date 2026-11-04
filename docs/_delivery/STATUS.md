@@ -1,3 +1,4 @@
+- GOOGLE DOM RUNTIME VERIFIED from saved summary 2026-11-04: 8 stores / 4 workers in 106.031s; 262 review rows in 7 Parquet files, matching SQLite count, 0 pending; 4 browser sessions, 0 restarts, cleanup verified. Outcomes: 3 FULL, 4 PARTIAL_LIMIT (5-scroll cap), 1 unresolved/DLQ; acceptance_pass=false. Retain architecture and continue platform development; branch identity, exhaustive coverage and large-batch readiness UNVERIFIED. Evidence and limits: [Google crawler QA](GOOGLE_CRAWLER_V1_QA.md#eight-store--four-worker-dom-result-2026-11-04). NEXT: review unresolved job and validate seven selected branches. PRE-COMMIT VERIFIED: 227 focused Google tests PASS (2 existing optional dependency warnings); fresh basetemp avoids default-temp access error.
 # Delivery status
 
 Updated: 2026-10-28. Branch: feature/fnb-data-platform.

@@ -34,6 +34,7 @@ from . import selectors
 from .extractor import ReviewExtractor
 from .navigator import GoogleMapsNavigator
 from .paginator import ReviewPaginator
+from .place_details import extract_place_details
 from .review_surface import ReviewSurface, ReviewSurfaceState
 from .review_timestamps import start_timestamp_collector
 from crawl_experiment.orchestration.review_incremental import IncrementalWindow
@@ -153,6 +154,21 @@ class GoogleMapsCrawler:
             )
             self._checkpoint(result, "store_resolved", elapsed_seconds=elapsed_for_store())
 
+            # Persist the storefront snapshot before opening reviews. A review
+            # UI/sort failure must not discard the public place details.
+            try:
+                self._activity(
+                    "place_details", store_id=store.id,
+                    google_place_details=extract_place_details(driver, store.id),
+                )
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Place detail snapshot failed for %s: %s", store.id, type(exc).__name__)
+                try:
+                    self._activity("place_details_capture_failed", store_id=store.id,
+                                   google_place_details_error=type(exc).__name__)
+                except Exception:
+                    pass
+
             surface = ReviewSurface(driver)
 
             def before_access_classification() -> None:
@@ -189,9 +205,25 @@ class GoogleMapsCrawler:
                     f"review sign-in required: {surface_evidence}"
                 )
             if review_pane is None:
-                raise ReviewSurfaceError(
+                error = ReviewSurfaceError(
                     f"review surface state UNKNOWN: {surface_evidence}"
                 )
+                # The absent Reviews tab is a store-local UI failure once the
+                # classifier has found no access restriction evidence. Carry
+                # this precise distinction into the worker retry/DLQ policy.
+                error.local_missing_review_tab = (
+                    surface_evidence.get("open_error") == "Reviews tab not found"
+                    and not surface_evidence.get("auth_dialog_evidence")
+                    and not surface_evidence.get("limited_evidence")
+                    and surface_evidence.get("review_tabs") == 0
+                    and surface_evidence.get("cards") == 0
+                )
+                error.local_review_tab_click_intercepted = (
+                    surface_evidence.get('open_error_code') == 'REVIEW_TAB_CLICK_INTERCEPTED'
+                    and not surface_evidence.get('auth_dialog_evidence')
+                    and not surface_evidence.get('limited_evidence')
+                )
+                raise error
             self._checkpoint(result, "reviews_surface_opened", elapsed_seconds=elapsed_for_store())
             self._checkpoint(result, "review_pane_found", elapsed_seconds=elapsed_for_store())
             if sort_newest:
