@@ -34,6 +34,11 @@ class _Element:
         return True
 
     def find_elements(self, by, selector):
+        if by == 'xpath' and selector.startswith('ancestor::'):
+            import re
+            return [_Element(node) for node in self.node.parents
+                    if (node.name in {'button','a'} or node.get('role') in {'button','tab'})
+                    and re.search(r'write|viết',node.get_text(' ',strip=True)+' '+str(node.get('aria-label','')),re.I)]
         assert by == "css selector"
         return [_Element(node) for node in self.node.select(selector)]
 
@@ -47,6 +52,57 @@ class _Driver:
             return []
         assert by == "css selector"
         return [_Element(node) for node in self.soup.select(selector)]
+
+
+@pytest.mark.parametrize('markup',[
+    '<div tabindex="0"><span>Bài đánh giá</span></div>',
+    '<a href="#reviews">Reviews</a>',
+    '<div role="button">Bài đánh giá</div>',
+])
+def test_visible_review_text_click_without_tab_or_button_tag(markup):
+    driver=_Driver('<main role="main">'+markup+'</main>')
+    surface=ReviewSurface(driver)
+    surface.resolve_review_pane=lambda:'actual-review-pane'
+    assert surface.open_reviews()=='actual-review-pane'
+    assert len(driver.soup.select('[data-clicked=true]'))==1
+
+
+def test_text_fallback_does_not_click_nested_write_review_or_review_body():
+    driver=_Driver('''<main role="main">
+      <button>Viết <span>Bài đánh giá</span></button>
+      <div data-review-id="review"><span>Bài đánh giá</span></div>
+      <div role="feed"><span>Bài đánh giá</span></div>
+    </main>''')
+    assert ReviewSurface(driver)._review_controls()==[]
+
+
+@pytest.mark.parametrize('menu',['','<button role="tab">Thực đơn</button>'])
+def test_top_review_tab_selected_with_or_without_menu(menu):
+    driver=_Driver('<main role="main"><div role="tablist">'
+        '<button role="tab">Tổng quan</button>'+menu+
+        '<button role="tab" id="top-reviews">Bài đánh giá</button>'
+        '<button role="tab">Giới thiệu</button></div>'
+        '<button>Viết bài đánh giá</button></main>')
+    surface=ReviewSurface(driver);surface.resolve_review_pane=lambda:'pane'
+    assert surface.open_reviews()=='pane'
+    clicked=driver.soup.select('[data-clicked=true]')
+    assert len(clicked)==1 and clicked[0]['id']=='top-reviews'
+
+
+def test_top_tab_fast_path_skips_broad_and_xpath_fallbacks():
+    driver=_Driver('<main role="main"><div role="tablist">'
+        '<button role="tab">Tổng quan</button>'
+        '<button role="tab">Bài đánh giá</button></div></main>')
+    calls=[];find=driver.find_elements
+    def record(by,selector):
+        calls.append((by,selector))
+        return find(by,selector)
+    driver.find_elements=record
+    surface=ReviewSurface(driver)
+    controls=surface._review_controls()
+    assert len(controls)==1 and controls[0].text=='Bài đánh giá'
+    assert len(calls)==1 and 'tablist' in calls[0][1]
+    assert surface.last_control_diagnostics['detection_path']=='TOP_TAB_FAST_PATH'
 
 
 @pytest.mark.parametrize("label", ["Bài đánh giá", "Đánh giá", "Reviews"])
@@ -144,6 +200,116 @@ def test_sort_control_ignores_unrelated_review_and_menu_buttons():
         "<button aria-label='Menu'>Menu</button></div>"
     )
     assert ReviewSurface(driver)._find_sort_button() is None
+
+
+def test_text_only_review_tab_is_preferred_to_count_button_and_write_review():
+    driver=_Driver("<main role='main'><button aria-label='126 bài đánh giá'>126 bài đánh giá</button>"
+                   "<button role='tab'>Viết bài đánh giá</button>"
+                   "<button role='tab'><span>Bài đánh giá</span></button></main>")
+    surface=ReviewSurface(driver);surface.resolve_review_pane=lambda:'pane'
+    assert surface.open_reviews()=='pane'
+    clicked=driver.soup.select('[data-clicked=true]')
+    assert len(clicked)==1 and clicked[0].get('role')=='tab'
+    assert clicked[0].get_text(strip=True)=='Bài đánh giá'
+
+
+def test_waits_for_lazy_loaded_text_only_review_tab():
+    driver=_Driver("<main role='main'></main>")
+    now=[0]
+    def sleep(seconds):
+        now[0]+=seconds
+        if not driver.soup.select('[role=tab]'):
+            driver.soup.select_one('main').append(BeautifulSoup('<button role="tab">Bài đánh giá</button>','html.parser'))
+    surface=ReviewSurface(driver,clock=lambda:now[0],sleeper=sleep)
+    surface.resolve_review_pane=lambda:'pane'
+    assert surface.open_reviews()=='pane' and now[0]>0
+
+
+@pytest.mark.parametrize('label',['Assorted breads and iced drinks','Milk tea with assorted toppings'])
+def test_saved_photo_labels_are_not_sort_controls(label):
+    driver=_Driver(f'<main role="main"><button class="Tya61d" aria-label="{label}"></button></main>')
+    surface=ReviewSurface(driver)
+    assert surface._find_sort_button() is None
+    assert not surface._interactive_sort_control_confirmed(driver.find_elements('css selector','button')[0])
+
+
+def test_positive_metadata_count_prevents_false_zero_review_classification():
+    driver=_Driver('<main role="main">Chưa có bài đánh giá</main>')
+    surface=ReviewSurface(driver);surface.advertised_review_count=68
+    state,evidence=surface.classify_state()
+    assert state==ReviewSurfaceState.UNKNOWN and evidence['no_reviews_count_conflict']
+
+
+def test_initial_no_review_text_does_not_prevent_clicking_reviews_tab():
+    driver=_Driver('<main role="main">Chưa có bài đánh giá<button role="tab">Bài đánh giá</button></main>')
+    surface=ReviewSurface(driver)
+    state,_=surface.classify_state()
+    assert state!=ReviewSurfaceState.NO_REVIEWS
+    surface.resolve_review_pane=lambda:driver.find_elements('css selector','main')[0]
+    surface.prepare_and_classify()
+    assert driver.soup.select('[data-clicked=true]')
+
+
+def test_historical_xpath_review_fallback_is_used():
+    element=_Element(BeautifulSoup('<button role="tab">Reviews for this place</button>','html.parser').button)
+    class XPathDriver:
+        def find_elements(self,by,selector):return [element] if by=='xpath' else []
+    surface=ReviewSurface(XPathDriver());surface.resolve_review_pane=lambda:'pane'
+    assert surface.open_reviews()=='pane'
+    assert element.get_attribute('data-clicked')=='true'
+
+
+@pytest.mark.parametrize('kind',['stale','intercept'])
+def test_tab_is_reacquired_after_rerender_or_interception(monkeypatch,kind):
+    from selenium.common.exceptions import StaleElementReferenceException,ElementClickInterceptedException
+    driver=_Driver('<button role="tab">Bài đánh giá</button>')
+    count=[0];click=_Element.click
+    def flaky(element):
+        count[0]+=1
+        if count[0]==1:
+            error=StaleElementReferenceException if kind=='stale' else ElementClickInterceptedException
+            raise error('DOM rerender/overlay')
+        click(element)
+    monkeypatch.setattr(_Element,'click',flaky)
+    surface=ReviewSurface(driver);surface.resolve_review_pane=lambda:'pane'
+    assert surface.open_reviews()=='pane' and count[0]==2
+
+
+def test_search_feed_cannot_be_selected_as_review_pane():
+    class Driver:
+        def execute_script(self,*args):return dict(scrollHeight=1000,clientHeight=500,searchFeed=True)
+    class Pane:
+        def is_displayed(self):return True
+        def find_elements(self,*args):return []
+    result,reason=ReviewSurface(Driver())._score_pane(Pane(),selectors.REVIEW_PANE_PRIMARY)
+    assert result is None and reason['rejected']=='SEARCH_RESULTS_FEED_NOT_REVIEWS'
+
+
+def test_already_open_cards_without_tab_reacquire_pane_without_click():
+    driver=_Driver('<main role="main"><div data-review-id="real-id"></div></main>')
+    surface=ReviewSurface(driver);surface.resolve_review_pane=lambda:'existing-pane'
+    assert surface.open_reviews()=='existing-pane'
+    assert not driver.soup.select('[data-clicked=true]')
+
+
+@pytest.mark.parametrize('confirmed',[True,False])
+def test_historical_newest_sort_requires_confirmation(monkeypatch,confirmed):
+    from crawl_experiment.core.errors import SortError
+    driver=_Driver('<main role="main"><button aria-label="Sắp xếp bài đánh giá"></button>'
+                   '<div role="menuitemradio" aria-checked="false">Mới nhất</div></main>')
+    surface=ReviewSurface(driver)
+    button=driver.find_elements('css selector','button')[0]
+    option=driver.find_elements('css selector','[role=menuitemradio]')[0]
+    monkeypatch.setattr(surface,'_find_sort_button',lambda:button)
+    monkeypatch.setattr(surface,'_button_diagnostics',lambda b:{})
+    monkeypatch.setattr(surface,'_open_menu_with_bounded_clicks',lambda b:(True,['normal']))
+    monkeypatch.setattr(surface,'_visible_sort_options',lambda:[option])
+    monkeypatch.setattr(surface,'_confirm_newest',lambda *args:confirmed)
+    if confirmed:
+        surface._sort_newest_once()
+        assert option.get_attribute('data-clicked')=='true'
+    else:
+        with pytest.raises(SortError,match='not confirmed'):surface._sort_newest_once()
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,7 @@ from crawl_experiment.core.errors import PlaceResolutionError
 from crawl_experiment.core.models import ResolutionResult, Store
 from crawl_experiment.core.place_catalog import CanonicalPlace
 from .navigator import GoogleMapsNavigator
+from .poi_input import search_plan, coordinates
 
 
 def normalized(value: str | None) -> str:
@@ -30,6 +31,8 @@ def google_identity(url: str | None) -> tuple[str | None, str | None]:
 
 def coordinate_distance(place: CanonicalPlace, url: str | None) -> float | None:
     # !3d/!4d is the entity point. Never use the @ viewport camera location.
+    if coordinates(place.to_dict())[0] is None:
+        return None
     match = re.search(r"!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)", unquote(url or ""))
     if not match:
         return None
@@ -54,8 +57,12 @@ def assess_resolution(place: CanonicalPlace, diagnostics: dict[str, Any]) -> Res
     if distance is not None and name_score is not None:
         weighted = 0.5 * name_score + 0.4 * max(0, 1 - distance / 500)
         score = (weighted + 0.1 * address_score) if address_score is not None else weighted / 0.9
-    resolved = bool(diagnostics.get("place_entity_confirmed") and identity and distance is not None
-                    and distance <= 100 and name_score is not None and name_score >= 0.85
+    if distance is None and name_score is not None and address_score is not None:
+        score=(name_score+address_score)/2
+    resolved = bool(diagnostics.get("place_entity_confirmed") and identity
+                    and diagnostics.get('identity_status') != 'IDENTITY_UNVERIFIED'
+                    and (distance is None or distance <= 100) and name_score is not None and name_score >= 0.85
+                    and address_score is not None and address_score >= 0.85
                     and score is not None and score >= 0.85)
     return dict(place_key=place.place_key, overture_name=place.name, google_name=title,
                 google_place_id=identity, google_id_kind=kind, coordinate_distance_m=distance,
@@ -65,14 +72,23 @@ def assess_resolution(place: CanonicalPlace, diagnostics: dict[str, Any]) -> Res
 
 def resolve_place(place: CanonicalPlace, driver: Any) -> ResolutionResult:
     navigator = GoogleMapsNavigator(driver)
-    query = " ".join(filter(None, [place.name, place.address, place.admin_area_name]))
+    plan=search_plan(place.to_dict())
+    query = plan['query']
     error = None
     try:
         navigator.open_store(Store(id=store_id(place), name=place.name, query=query,
-                                   expected_address=place.address))
+                                   expected_address=place.address,
+                                   expected_latitude=plan['latitude'], expected_longitude=plan['longitude'],
+                                   search_eligible=plan['eligible'], search_reason=plan['reason']))
     except PlaceResolutionError as exc:
         error = str(exc).splitlines()[0]
     row = assess_resolution(place, navigator.last_resolution_diagnostics)
+    row['verification_outcome']=navigator.last_resolution_diagnostics.get('resolution_outcome') or (
+        'VERIFIED' if row['status']=='RESOLVED' else 'UNRESOLVED')
+    row['verification_reason']=navigator.last_resolution_diagnostics.get('resolution_reason') or plan['reason']
+    if not plan['eligible']:
+        row['error']=plan['reason']
+        return row
     if row["status"] != "RESOLVED":
         body = driver.execute_script("return document.body ? document.body.innerText : '';")
         if re.search(r"no results found|không tìm thấy kết quả|không có kết quả", body or "", re.I):

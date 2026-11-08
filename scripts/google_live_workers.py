@@ -66,7 +66,16 @@ def claim_next(path, owner):
         return row[0], json.loads(row[1])
 
 
+def closed_metadata_completed(result):
+    return (result.get('status')=='COMPLETE' and result.get('business_status')=='CLOSED_PERMANENTLY'
+            and result.get('review_collection_status') in {'UNAVAILABLE_CLOSED_PERMANENTLY','PARTIAL_CLOSED_PERMANENTLY'})
+
+
 def crawl_outcome(result):
+    if result.get('status')=='PLACE_RESOLUTION_FAILED':
+        return 'UNRESOLVED'
+    if closed_metadata_completed(result):
+        return 'SUCCESS'
     if result.get('status') in {'COMPLETE', 'NO_REVIEWS'} and result.get('coverage') == 'FULL':
         return 'SUCCESS'
     if result.get('status') in {'PARTIAL_LIMIT', 'PARTIAL_TIMEOUT'} and result.get('coverage') == 'PARTIAL':
@@ -103,7 +112,9 @@ def validate_profile(profile, workers):
     profile = Path(profile).resolve()
     if workers != 1:
         raise ValueError('A logged-in profile requires --workers 1')
-    if (profile.parent != (ROOT/'output').resolve() or
+    # Dedicated crawler profiles may live in another worktree. Resolve the
+    # actual path before locking/checking Chrome so both worktrees share locks.
+    if (profile.parent.name != 'output' or
             not re.fullmatch(r'google-crawler-login(?:-[0-9]+)?',profile.name)):
         raise ValueError('Only dedicated output/google-crawler-login[-NN] profiles are allowed')
     if not (profile/'Local State').is_file() or not (profile/'Default'/'Preferences').is_file():
@@ -188,6 +199,8 @@ def stop_scope(row):
             or any(row.get(key) in {'AUTH_REQUIRED','CHALLENGE','RATE_LIMITED'}
                    for key in ('final_access_state','access_state_after_place_resolution'))):
         return 'WORKER'
+    if closed_metadata_completed(row):
+        return None
     if row.get('status') in {'ERROR','SESSION_FAILED','FAILED_BROWSER','FAILED_RUNTIME','PERSISTING'}:
         return 'WORKER'
     return 'WORKER' if restricted(row) else None
@@ -277,14 +290,15 @@ def stop_source(path, row):
 
 def store_for(place):
     from crawl_experiment.core.models import Store
-    address = str(place.get('address') or '').strip()
-    if not address:
-        raise ValueError('Live matching requires a source address')
-    # Overture IDs are retained; source-provided names/addresses are not asserted
-    # to be verified Google identities. Existing navigator performs matching.
-    query = ' '.join([place['name'], address, str(place.get('admin_area_name') or '')])
-    return Store('overture-' + uuid.uuid5(uuid.NAMESPACE_URL, place['place_key']).hex,
-        place['name'], query, expected_address=address)
+    from crawl_experiment.sources.google_maps.poi_input import identity, search_plan
+    plan=search_plan(place)
+    key=identity(place)
+    prefix='overture' if key.startswith('overture:') else 'poi'
+    return Store(prefix + '-' + uuid.uuid5(uuid.NAMESPACE_URL,key).hex,
+                 place.get('name') or '', plan['query'], expected_address=place.get('address'),
+                 expected_latitude=plan['latitude'], expected_longitude=plan['longitude'],
+                 search_eligible=plan['eligible'], search_reason=plan['reason'],
+                 geographic_context=plan['geographic_context'], expected_ward=plan['ward'])
 
 
 def reconcile(database, lake):
@@ -469,8 +483,23 @@ def _crawl_shard(plan, directory, *, factory_builder=None, crawl_runner=None, as
         store = store_for(place)
         job = directory/f'job-{index:02d}'
         job.mkdir(exist_ok=False)
-        write_json(job/'input.json', dict(overture=place, store=asdict(store)))
+        from crawl_experiment.sources.google_maps.poi_input import search_plan
+        write_json(job/'input.json', dict(overture=place, source_record=place, store=asdict(store),
+                                         search_plan=search_plan(place)))
         database, lake = job/'reviews.sqlite3', job/'lake'
+        if not store.search_eligible:
+            row=dict(id=store.id, place_key=place['place_key'], status='PLACE_RESOLUTION_FAILED',
+                     coverage='UNKNOWN', verification_status='UNRESOLVED',
+                     verification_reason=store.search_reason, collected_review_count=0,
+                     scroll_count=0, search_attempted=False, collection_status='SKIPPED_INSUFFICIENT_INFORMATION',
+                     elapsed_seconds=0, browser_startup_seconds=0, outcome='ERROR',disposition='UNRESOLVED')
+            rows.append(row)
+            with progress.open('a',encoding='utf-8') as stream:
+                stream.write(json.dumps(row,ensure_ascii=False)+'\n')
+            write_json(directory/'summary.json',dict(results=rows,startups=startups))
+            if plan.get('queue_path'):
+                finish_dispatch(Path(plan['queue_path']).resolve(),index,directory.name,row)
+            continue
         started = time.monotonic()
         startup_offset = len(startups)
         row = dict(id=store.id, place_key=place['place_key'], status='ERROR', coverage='UNKNOWN')
@@ -490,6 +519,8 @@ def _crawl_shard(plan, directory, *, factory_builder=None, crawl_runner=None, as
                 async_runner=async_runner,
                 browser_session_manager=worker_browser,
                 review_source=plan.get('review_source','dom'),
+                **(dict(max_reviews=plan['max_reviews'], review_idle_limit=plan.get('review_idle_limit',2),
+                        require_verified_branch=True) if plan.get('max_reviews') is not None else {}),
                 access_policy_config=AccessPolicyConfig(max_browser_retries=0, max_runtime_retries=0),
                 runner_name='scripts.google_live_workers')
             summaries = list((job/'crawl').glob('*/summary.json'))
@@ -508,6 +539,8 @@ def _crawl_shard(plan, directory, *, factory_builder=None, crawl_runner=None, as
                 row.update(status='ERROR', coverage='UNKNOWN', final_access_state='UNKNOWN',
                            error=row['runner_error'], error_category=classify_worker_error(row['runner_error']))
             row['reconciliation'] = reconcile(database, lake)
+            row['collected_review_count'] = row['reconciliation']['sqlite_records'] if 'sqlite_records' in row['reconciliation'] else row['reconciliation'].get('records')
+            row['collection_status'] = row['status']
             row['summary_path'] = str(summaries[0])
             row['browser_lifecycle_scope'] = 'worker-cumulative; final totals in worker summary'
             row['review_source'] = plan.get('review_source','dom')
@@ -518,6 +551,8 @@ def _crawl_shard(plan, directory, *, factory_builder=None, crawl_runner=None, as
             row['coverage'] = ('FULL' if row['status'] in {'COMPLETE', 'NO_REVIEWS'}
                 and not code and row['reconciliation']['pending']==0 else
                 'PARTIAL' if row['status'] in {'PARTIAL_TIMEOUT', 'PARTIAL_LIMIT'} else 'UNKNOWN')
+            if closed_metadata_completed(row) and not code and row['reconciliation']['pending']==0:
+                row['coverage']='METADATA_ONLY'
             if row['reconciliation']['pending']:
                 row['status'], row['coverage'] = 'PERSISTING', 'UNKNOWN'
         except Exception as exc:
@@ -539,8 +574,23 @@ def _crawl_shard(plan, directory, *, factory_builder=None, crawl_runner=None, as
         row['elapsed_seconds'] = time.monotonic()-started
         row['disposition'] = ('SOURCE_STOP' if scope=='SOURCE' else
                               'WORKER_STOP' if scope=='WORKER' else
+                              'COMPLETED_CLOSED' if closed_metadata_completed(row) else
+                              'UNRESOLVED' if row['status']=='PLACE_RESOLUTION_FAILED' else
                               'DLQ' if row['coverage']=='UNKNOWN' else row['coverage'])
         row['browser_startup_seconds'] = sum(s['elapsed_seconds'] for s in startups[startup_offset:])
+        if plan.get('max_reviews') is not None:
+            row['collection_status'] = row['status']
+            row['collected_review_count'] = row.get('reconciliation', {}).get('sqlite_records', 0)
+            row['verification_status'] = (row.get('identity_status') or ('VERIFIED' if row.get('place_entity_confirmed') is True else
+                row.get('resolution_outcome') or ('UNRESOLVED' if row['status']=='PLACE_RESOLUTION_FAILED' else 'FAILED'))
+                )
+            row['verification_reason'] = row.get('resolution_reason')
+            row['search_attempted'] = True
+            row['configured_max_reviews'] = plan['max_reviews']
+            row['configured_idle_scrolls'] = plan.get('review_idle_limit', 2)
+            row['source_address_missing'] = not bool((place.get('address') or '').strip())
+            from crawl_experiment.sources.google_maps.poi_input import search_plan
+            row['search_mode'] = search_plan(place)['mode']
         rows.append(row)
         with progress.open('a', encoding='utf-8') as stream:
             stream.write(json.dumps(row, ensure_ascii=False)+'\n')
@@ -668,11 +718,13 @@ def run(catalog, output, *, profile_dir=None, **options):
 
 def _run(catalog, output, *, limit=10, workers=2, per_store_seconds=180,
         max_scrolls=50, total_seconds=1200, operator_submit=False, profile_dirs=None,
-        review_source='dom', startup_debug=False):
+        review_source='dom', startup_debug=False, max_reviews=None, review_idle_limit=2):
     if not operator_submit:
         raise ValueError('Explicit --operator-submit is required for new public-source attempts')
     if os.name != 'nt':
         raise RuntimeError('Live runner requires Windows native containment; Linux is unvalidated')
+    if max_reviews is not None and (max_reviews < 1 or review_idle_limit < 1):
+        raise ValueError('Invalid review bounds')
     if review_source != 'dom':
         raise ValueError('Unsupported review source')
     if any(not math.isfinite(v) or v<=0 for v in (per_store_seconds, total_seconds)) or max_scrolls<1:
@@ -691,6 +743,7 @@ def _run(catalog, output, *, limit=10, workers=2, per_store_seconds=180,
         logged_out=not profile_dirs, profile_mode='operator-dedicated' if profile_dirs else 'fresh',
         catalog_sha256=hashlib.sha256(catalog.read_bytes()).hexdigest(),
         per_store_seconds=per_store_seconds, max_scrolls=max_scrolls,
+        max_reviews=max_reviews, review_idle_limit=review_idle_limit,
         review_source=review_source, startup_debug=startup_debug,
         total_seconds=total_seconds, legacy_incident='PRESERVED_NOT_REPLAYED',
         storage_semantics='existing standalone change events; not append-all Bronze'))
@@ -707,6 +760,7 @@ def _run(catalog, output, *, limit=10, workers=2, per_store_seconds=180,
             directory.mkdir()
             write_json(directory/'plan.json', dict(places=[], queue_path=str(queue_path),
                 per_store_seconds=per_store_seconds, max_scrolls=max_scrolls,
+        max_reviews=max_reviews, review_idle_limit=review_idle_limit,
                 profile_dir=str(profile_dirs[index]) if profile_dirs else None,review_source=review_source,
                 startup_debug=startup_debug))
             child = NativeWorker(directory/'plan.json')
@@ -796,6 +850,7 @@ def _run(catalog, output, *, limit=10, workers=2, per_store_seconds=180,
             stopped_workers=[directory.name for _,directory in children
                              if (directory/'WORKER_STOP.json').exists()],
             full_store_count=sum(r['coverage']=='FULL' for r in rows),
+            completed_closed_store_count=sum(closed_metadata_completed(r) for r in rows),
             partial_store_count=sum(r['coverage']=='PARTIAL' for r in rows),
             unknown_store_count=sum(r['coverage']=='UNKNOWN' for r in rows),
             elapsed_seconds=elapsed, results=rows, cleanup=cleanup,
@@ -809,7 +864,7 @@ def _run(catalog, output, *, limit=10, workers=2, per_store_seconds=180,
         # Completion of a process is not completion of collection or publication.
         result['acceptance_pass'] = (reason is None and len(rows)==limit and result['cleanup_verified']
             and not result['source_stopped'] and not storage_errors and result['pending']==0
-            and all(r['coverage']=='FULL' for r in rows))
+            and all(r['coverage']=='FULL' or closed_metadata_completed(r) for r in rows))
         durations=sorted(r['elapsed_seconds'] for r in rows)
         def percentile(fraction):
             if not durations:return None
@@ -874,6 +929,8 @@ def main(argv=None):
     parser.add_argument('--workers', type=int, default=2)
     parser.add_argument('--per-store-seconds', type=float, default=180)
     parser.add_argument('--max-scrolls', type=int, default=50)
+    parser.add_argument('--max-reviews', type=int, default=None)
+    parser.add_argument('--review-idle-limit', type=int, default=2)
     parser.add_argument('--total-seconds', type=float, default=1200)
     parser.add_argument('--operator-submit', action='store_true')
     parser.add_argument('--profile-dir', type=Path,action='append',
@@ -894,6 +951,7 @@ def main(argv=None):
         parser.error('--catalog and --output are required')
     result = run(args.catalog, args.output, limit=args.limit, workers=args.workers,
         per_store_seconds=args.per_store_seconds, max_scrolls=args.max_scrolls,
+        max_reviews=args.max_reviews, review_idle_limit=args.review_idle_limit,
         total_seconds=args.total_seconds, operator_submit=args.operator_submit,
         profile_dir=args.profile_dir, review_source=args.review_source, startup_debug=args.startup_debug)
     print(json.dumps({k:v for k,v in result.items() if k not in {'results', 'cleanup'}}))

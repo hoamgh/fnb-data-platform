@@ -26,21 +26,15 @@ def load_places(catalog, limit):
     if limit < 1:
         raise ValueError('limit must be positive')
     rows = pq.read_table(catalog).to_pylist()
+    from crawl_experiment.sources.google_maps.poi_input import identity
     selected, seen = [], set()
     for row in rows:
-        key = row.get('place_key')
-        if not isinstance(key, str) or not key.startswith('overture:') or key in seen:
-            raise ValueError('Missing or duplicate Overture identity')
+        key=identity(row)
+        if key in seen:
+            raise ValueError('Duplicate source identity')
         seen.add(key)
-        if row.get('source') != 'overture' or not str(row.get('name') or '').strip():
-            raise ValueError('Invalid Overture source/name')
-        if 'food_and_drink' not in (row.get('category_hierarchy') or []):
-            raise ValueError('Not an F&B place')
-        for field, bound in [('lat', 90), ('lng', 180)]:
-            value = row.get(field)
-            if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or abs(value) > bound:
-                raise ValueError('Invalid coordinate')
-        selected.append(row)
+        # Keep raw columns/nulls; missing optional fields are not admission gates.
+        selected.append(dict(row,place_key=key))
     if len(selected) < limit:
         raise ValueError('Catalog contains fewer places than requested')
     return sorted(selected, key=lambda r: r['place_key'])[:limit]

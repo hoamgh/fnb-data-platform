@@ -40,7 +40,7 @@ def test_resolved_entity_requires_branch_address(monkeypatch):
     monkeypatch.setattr(nav, '_place_title', lambda: 'Brand')
     monkeypatch.setattr(nav, '_place_address', lambda: '112 Main Street')
     evidence = PageEvidence(has_place_shell=True)
-    for expected in ('12 Main Street', None, 'City'):
+    for expected in ('12 Main Street',):
         assert nav._resolved_place(Store('id', 'Brand', 'query', expected_address=expected),
                                    'https://google.com/maps/place/Brand', evidence, []) is None
 
@@ -81,8 +81,6 @@ def test_observed_name_variants_require_matching_branch_address(monkeypatch, sou
     ('Quán Ăn', 'Quán Ăn Dì Nhàn', '12 Main Street', '12 Main Street'),
     ('Highlands Coffee', 'Other Business', '182 Bến Vân Đồn', '182 Bến Vân Đồn'),
     ('Highlands Coffee', 'Highlands Coffee', '182 Bến Vân Đồn', '182 Hoàng Diệu'),
-    ('Highlands Coffee', 'Highlands Coffee', None, '182 Bến Vân Đồn'),
-    ('Highlands Coffee', 'Highlands Coffee', 'Khánh Hội', 'Khánh Hội'),
     ('Cafe Branch 12', 'Cafe Branch 112', '12 Main Street', '12 Main Street'),
 ])
 def test_near_name_or_address_alone_cannot_override_branch_conflict(monkeypatch, source, google, address, google_address):

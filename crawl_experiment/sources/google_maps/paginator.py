@@ -34,6 +34,7 @@ class ReviewPaginator:
         *,
         max_scrolls: int = 1000,
         idle_limit: int = 8,
+        wait_for_idle_limit: bool = False,
         deadline: float | None = None,
         advertised_count: int | None = None,
         clock=time.monotonic,
@@ -45,6 +46,7 @@ class ReviewPaginator:
         self.pane = pane
         self.max_scrolls = max_scrolls
         self.idle_limit = idle_limit
+        self.wait_for_idle_limit = wait_for_idle_limit
         self.deadline = deadline
         self.advertised_count = advertised_count
         self.clock = clock
@@ -82,7 +84,7 @@ class ReviewPaginator:
             return "advertised_count"
         if self.state.scroll_count >= self.max_scrolls:
             return "max_scrolls"
-        if self.state.non_scrollable:
+        if self.state.non_scrollable and not self.wait_for_idle_limit:
             return "natural_end" if self.state.at_end and self.state.seen_ids else "stalled"
         if self.state.idle_count >= self.idle_limit:
             return "stalled"

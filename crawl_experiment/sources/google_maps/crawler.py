@@ -52,6 +52,8 @@ class GoogleMapsCrawler:
         *,
         max_scrolls: int = 1000,
         idle_limit: int = 8,
+        max_reviews: int | None = None,
+        require_verified_branch: bool = False,
         timeout_seconds: float = 900,
         clock=time.monotonic,
         wall_clock=lambda: datetime.now(timezone.utc),
@@ -67,6 +69,10 @@ class GoogleMapsCrawler:
         self.metrics = metrics or CrawlMetrics()
         self.max_scrolls = max_scrolls
         self.idle_limit = idle_limit
+        if max_reviews is not None and max_reviews < 1:
+            raise ValueError("max_reviews must be positive")
+        self.max_reviews = max_reviews
+        self.require_verified_branch = require_verified_branch
         self.timeout_seconds = timeout_seconds
         self.clock = clock
         self.wall_clock = wall_clock
@@ -146,6 +152,8 @@ class GoogleMapsCrawler:
                     **getattr(navigator, "last_resolution_diagnostics", {}),
                 )
                 raise
+            if self.require_verified_branch and getattr(navigator, "last_resolution_diagnostics", {}).get("place_entity_confirmed") is not True:
+                raise PlaceResolutionError("Branch verification evidence missing; reviews skipped")
             phase_times["resolved"] = self.clock()
             self._activity(
                 "place_resolution",
@@ -156,11 +164,14 @@ class GoogleMapsCrawler:
 
             # Persist the storefront snapshot before opening reviews. A review
             # UI/sort failure must not discard the public place details.
+            place_details = None
             try:
+                place_details = extract_place_details(driver, store.id)
                 self._activity(
                     "place_details", store_id=store.id,
-                    google_place_details=extract_place_details(driver, store.id),
+                    google_place_details=place_details,
                 )
+                result.business_status = place_details.get('business_status')
             except Exception as exc:
                 logging.getLogger(__name__).warning("Place detail snapshot failed for %s: %s", store.id, type(exc).__name__)
                 try:
@@ -170,6 +181,7 @@ class GoogleMapsCrawler:
                     pass
 
             surface = ReviewSurface(driver)
+            surface.advertised_review_count = (place_details or {}).get('review_count')
 
             def before_access_classification() -> None:
                 phase_times["reviews_opened"] = self.clock()
@@ -193,6 +205,8 @@ class GoogleMapsCrawler:
                 opened=review_pane is not None,
             )
             if surface_state is ReviewSurfaceState.NO_REVIEWS:
+                if result.business_status == 'CLOSED_PERMANENTLY':
+                    return self._closed_completed(result, 'SOURCE_REVIEW_SURFACE_EMPTY')
                 result.status = CrawlStatus.NO_REVIEWS
                 result.failure_stage = None
                 return result
@@ -261,11 +275,13 @@ class GoogleMapsCrawler:
                 review_pane,
                 max_scrolls=min(self.max_scrolls,(incremental_config or reconciliation_config).max_scrolls) if (incremental or reconciliation) else self.max_scrolls,
                 idle_limit=self.idle_limit,
+                wait_for_idle_limit=self.max_reviews is not None,
                 deadline=self.clock() + self.timeout_seconds,
                 clock=self.clock,
             )
             extractor = ReviewExtractor()
             extractor.timestamp_collector = timestamp_collector
+            collected_ids = set()
             new_ids_in_last_observation = 0
             pending_scroll = None
             while True:
@@ -290,6 +306,10 @@ class GoogleMapsCrawler:
                     }
                     new_ids.discard(None)
                     new_ids.discard("")
+                if self.max_reviews is not None:
+                    remaining = self.max_reviews - len(collected_ids)
+                    new_ids = set(sorted(new_ids - collected_ids)[:remaining])
+                    collected_ids.update(new_ids)
                 self._trace_review_ids(store.id, new_ids, paginator.state.scroll_count)
                 if timestamp_collector is not None:
                     try:
@@ -332,6 +352,10 @@ class GoogleMapsCrawler:
                     idle_count=idle_count,
                 )
                 reason = 'known_streak_boundary' if incremental and incremental.stopped else paginator.stop_reason()
+                if self.max_reviews is not None and len(collected_ids) >= self.max_reviews:
+                    reason = "max_reviews"
+                elif self.max_reviews is not None and idle_count >= self.idle_limit:
+                    reason = "no_new_reviews"
                 if reconciliation and len(paginator.state.seen_ids)>=reconciliation.config.recent_review_limit:
                     reason='reconciliation_window'
                 if reason:
@@ -365,8 +389,20 @@ class GoogleMapsCrawler:
                 result.parse_errors,
                 timeout_had_growth=new_ids_in_last_observation > 0,
             )
+            if result.business_status == 'CLOSED_PERMANENTLY' and result.status in {
+                    CrawlStatus.EXTRACTION_DEGRADED, CrawlStatus.PAGINATION_STALLED}:
+                return self._closed_completed(result, str(result.status))
             return result
         except Exception as exc:
+            # A source-confirmed permanent closure is a completed metadata job.
+            # Never suppress auth/rate-limit, browser, server or persistence errors.
+            message=str(exc).casefold()
+            if (result.business_status == 'CLOSED_PERMANENTLY'
+                    and type(exc) in {ReviewSurfaceError, SortError, ReviewParseError}
+                    and not any(term in message for term in (
+                        'captcha','sign in','đăng nhập','login','rate limit','429','403',
+                        'http 5','server','máy chủ'))):
+                return self._closed_completed(result, type(exc).__name__)
             result.status, result.failure_stage = self._failure_status(exc)
             result.error = f"{type(exc).__name__}: {exc}"
             raise
@@ -397,6 +433,17 @@ class GoogleMapsCrawler:
                 result.failure_stage,
                 elapsed_seconds=result.elapsed_seconds,
             )
+
+    @staticmethod
+    def _closed_completed(result, reason):
+        result.status = CrawlStatus.COMPLETE
+        result.failure_stage = None
+        result.error = None
+        result.stop_reason = 'PERMANENTLY_CLOSED_REVIEWS_UNAVAILABLE'
+        result.review_collection_status = ('PARTIAL_CLOSED_PERMANENTLY' if result.reviews_written
+                                           else 'UNAVAILABLE_CLOSED_PERMANENTLY')
+        result.review_collection_reason = reason
+        return result
 
     def _extract_new_reviews(
         self,
@@ -487,7 +534,7 @@ class GoogleMapsCrawler:
                 if timeout_had_growth
                 else CrawlStatus.PAGINATION_STALLED
             )
-        if reason == "max_scrolls":
+        if reason in {"max_scrolls", "max_reviews", "no_new_reviews"}:
             return CrawlStatus.PARTIAL_LIMIT
         if reason == "reconciliation_window":
             return CrawlStatus.COMPLETE

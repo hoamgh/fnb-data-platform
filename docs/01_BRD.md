@@ -1,8 +1,17 @@
 # F&B Data Integration & Recommendation Platform
 
 **Business Requirements Document (BRD)**\
-**Phiên bản:** 1.3 · **Ngày:** 28/10/2026 · **Trạng thái:** Draft — chờ duyệt\
+**Phiên bản:** 1.4 · **Ngày:** 05/11/2026 · **Trạng thái:** Draft — chờ duyệt\
 **Phạm vi đầu tiên:** Phường Khánh Hội, TP.HCM
+
+## Lịch sử thay đổi và baseline
+
+| Phiên bản | Ngày | Trạng thái / thay đổi |
+|---|---|---|
+| 1.3 | 28/10/2026 | Baseline làm việc, Draft — chưa được phê duyệt; phạm vi nguồn trước đây là Overture + OSM. |
+| 1.4 | 05/11/2026 | Draft — chờ duyệt; thay vai trò nguồn, tách DQ/dedup/ER, xác định trạng thái xác minh, bổ sung Point Map và phân tích loại hình/khu vực bắt buộc; Density Map tùy chọn; giữ reviews/sentiment/recommendation ở giai đoạn sau. Giữ BG-01–05 và BR-01–11. |
+
+Bản này sửa từ BRD v1.3 theo quyết định phạm vi hiện tại, không xác nhận v1.3 đã được duyệt và không nhập yêu cầu từ BRD Market Intelligence riêng. SRS liên kết: `03_SRS.md` v1.1 Draft. **PRD `02_PRD.md` còn chờ đối soát**; các liên kết PF hiện có chưa được tái xác nhận.
 
 ## 1. Tổng quan dự án
 
@@ -43,34 +52,36 @@ Thông tin về quán ăn, nhà hàng và quán cà phê đang nằm ở nhiều
 ### 5.1. Giai đoạn đầu — danh mục F&B tại Khánh Hội
 
 - **Khu vực:** Phường Khánh Hội, TP.HCM; sử dụng ranh giới địa lý được xác minh và ghi rõ phiên bản.
-- **Nguồn địa điểm:** Overture Maps và OpenStreetMap (OSM), mỗi nguồn có phiên bản và thời điểm dữ liệu riêng.
+- **Nguồn địa điểm:** Overture Maps là nguồn POI chính. Google Maps cung cấp bằng chứng xác minh chi nhánh, khử trùng lặp và bổ sung thuộc tính từ quan sát đã lưu được phép sử dụng; ghi nguồn, phiên bản/thời điểm và phạm vi quan sát. Không yêu cầu xác minh Google cho mọi ứng viên.
 - **Đối tượng:** Các địa điểm thuộc nhóm F&B theo danh mục được thống nhất trước khi xử lý. Một cửa hàng được tính theo **chi nhánh vật lý**, không tính theo thương hiệu.
-- **Xử lý nghiệp vụ:** Kiểm tra dữ liệu, chuẩn hóa, đối chiếu địa điểm, phân biệt trùng/khác/chưa xác định và tạo danh mục cửa hàng thống nhất.
-- **Sử dụng kết quả:** Tra cứu, lọc và phân tích danh mục; xem nguồn của từng cửa hàng và báo cáo chất lượng dữ liệu. Chưa bắt buộc có giao diện web ở giai đoạn này.
+- **Xử lý nghiệp vụ:** Tách kiểm tra chất lượng dữ liệu (DQ), khử trùng lặp trong cùng nguồn (deduplication) và đối chiếu danh tính giữa các nguồn (ER); chuẩn hóa và tạo danh mục với bằng chứng, quyết định và mức độ chưa chắc chắn được giữ riêng.
+- **Sử dụng kết quả bắt buộc:** Tra cứu/lọc danh mục, Point Map (bản đồ điểm POI), phân tích loại hình/khu vực và báo cáo chất lượng có nguồn gốc, trạng thái xác minh. Không bắt buộc website. **Density Map/phân tích mật độ địa lý là tùy chọn**, không chặn nghiệm thu; chỉ phản ánh dữ liệu quan sát, không phải mật độ đầy đủ của thị trường.
 
 ### 5.2. Giai đoạn tiếp theo
 
 - Tích hợp dữ liệu reviews từ nguồn **được phép thu thập, lưu trữ và sử dụng**; liên kết reviews với đúng chi nhánh.
-- Phân tích những đặc điểm được phản ánh trong reviews như món ăn, dịch vụ, không gian, mức giá khi có đủ bằng chứng.
+- Phân tích sentiment và những đặc điểm được phản ánh trong reviews như món ăn, dịch vụ, không gian, mức giá khi có đủ bằng chứng.
 - Xây dựng và đánh giá chức năng gợi ý địa điểm; bổ sung cập nhật định kỳ và mở rộng sang khu vực khác khi kết quả pilot đáp ứng yêu cầu.
 
 ### 5.3. Ngoài phạm vi hiện tại
 
+- OSM không thuộc luồng tích hợp POI hiện tại; Foody tạm dừng. Không chạy crawler live để đáp ứng MVP. Reviews, sentiment và recommendation không phải điều kiện nghiệm thu MVP.
+
 - Thu thập toàn bộ cửa hàng hoặc reviews của TP.HCM ngay từ đầu.
 - Xây chức năng đặt bàn, đặt món, giao hàng hoặc thanh toán.
-- Coi mọi POI thu thập được là cửa hàng đang hoạt động hoặc coi hai nguồn dữ liệu là danh sách đầy đủ toàn bộ quán trong khu vực.
+- Coi mọi POI thu thập được là cửa hàng đang hoạt động hoặc coi dữ liệu quan sát là danh sách đầy đủ toàn bộ quán trong khu vực.
 - Phụ thuộc vào dữ liệu reviews chưa xác nhận quyền sử dụng để hoàn thành giai đoạn đầu.
 
 ## 6. Yêu cầu nghiệp vụ
 
 | ID | Yêu cầu | Giai đoạn |
 |---|---|---|
-| BR-01 | Tiếp nhận dữ liệu F&B từ Overture Maps và OSM trong cùng phạm vi địa lý; lưu được nguồn và phiên bản dữ liệu | Đầu tiên |
+| BR-01 | Tiếp nhận POI Overture làm nguồn chính và quan sát Google Maps đã lưu, được phép dùng để xác minh/bổ sung; lưu nguồn, phiên bản/thời điểm và phạm vi; không yêu cầu Google phủ mọi ứng viên | Đầu tiên |
 | BR-02 | Nhận diện các bản ghi thuộc cùng **một chi nhánh** và tạo định danh cửa hàng thống nhất | Đầu tiên |
 | BR-03 | Giữ liên kết từ cửa hàng thống nhất về các bản ghi và mã định danh của từng nguồn | Đầu tiên |
-| BR-04 | Phân biệt bản ghi **trùng**, **khác nhau** và **cần xác minh**; không tự gộp khi chưa đủ bằng chứng | Đầu tiên |
-| BR-05 | Cung cấp danh mục cửa hàng có thể tra cứu, lọc và phân tích theo khu vực, loại hình và nguồn dữ liệu | Đầu tiên |
-| BR-06 | Cung cấp số liệu về số bản ghi từng nguồn, phần trùng, phần bổ sung, trường dữ liệu thiếu và các trường hợp chưa xác định | Đầu tiên |
+| BR-04 | Tách DQ, dedup trong nguồn và ER giữa nguồn; phân biệt trùng/khác/cần xác minh, giữ trạng thái xác minh và không tự gộp khi thiếu bằng chứng | Đầu tiên |
+| BR-05 | Cung cấp danh mục tra cứu/lọc, Point Map và phân tích loại hình/khu vực/nguồn bắt buộc; Density Map tùy chọn, không chặn MVP | Đầu tiên |
+| BR-06 | Báo cáo riêng DQ, dedup trong nguồn, liên kết ER được chấp nhận, đóng góp nguồn và trạng thái xác minh; ghi mẫu số/phạm vi, không coi độ phủ Google là đầy đủ | Đầu tiên |
 | BR-07 | Khi xử lý lại cùng dữ liệu và cùng quy tắc, không phát sinh thêm cửa hàng trùng và giữ kết quả nhất quán | Đầu tiên |
 | BR-08 | Hỗ trợ nhận diện bản ghi mới, thay đổi hoặc không còn xuất hiện trong phiên bản nguồn mới, nhưng không tự kết luận quán đã đóng cửa | Tiếp theo |
 | BR-09 | Liên kết reviews hợp lệ với đúng cửa hàng và phân biệt dữ liệu gốc với thông tin suy ra từ reviews | Tiếp theo |
@@ -85,30 +96,43 @@ Thông tin về quán ăn, nhà hàng và quán cà phê đang nằm ở nhiều
 4. Mỗi cửa hàng trong danh mục phải có ít nhất một bản ghi nguồn truy vết được; thông tin suy ra phải phân biệt với thông tin nguồn.
 5. Thiếu một địa điểm ở nguồn mới **không có nghĩa** địa điểm đã đóng cửa; trạng thái hoạt động cần bằng chứng riêng.
 6. Số POI trong dữ liệu không được công bố như số cửa hàng thực tế hay mức độ bao phủ tuyệt đối nếu chưa có kiểm chứng độc lập.
-7. Chỉ sử dụng dữ liệu trong giới hạn được phép của từng nguồn, đặc biệt với reviews và dữ liệu có điều kiện lưu trữ/tái phân phối.
+7. Chỉ truy cập, lưu trữ, tái sử dụng và chia sẻ dữ liệu trong giới hạn được phép của từng nguồn, kể cả metadata Google Maps, reviews và dữ liệu có điều kiện tái phân phối. Có crawler hoặc dữ liệu đã lưu không chứng minh quyền sử dụng; không tự đưa dữ liệu hạn chế vào bản đồ/báo cáo công bố.
 8. Dữ liệu và các quyết định đối chiếu được công bố phải có khả năng giải thích, kiểm tra và tái tạo bằng đầu vào tương ứng.
+
+### Trạng thái xác minh và phạm vi quyết định
+
+- **VERIFIED:** có đủ bằng chứng được chấp nhận rằng quan sát Google được xét thuộc đúng chi nhánh Overture; lưu bằng chứng, thời điểm và nguồn/quy tắc quyết định. Không tự xác nhận cửa hàng đang hoạt động hay mọi thuộc tính đều đúng.
+- **UNVERIFIED:** chưa có đối chiếu Google đủ để quyết định; vẫn được giữ như ứng viên/canonical singleton có nguồn Overture, không hàm ý liên kết chéo đã xác nhận.
+- **REVIEW_REQUIRED:** có đề xuất đối chiếu nhưng bằng chứng thiếu hoặc mâu thuẫn; giữ riêng và chờ xem xét, không hợp nhất theo đề xuất đó.
+- **REJECTED_MATCH:** đề xuất liên kết cụ thể bị bác bỏ; không loại POI Overture, không kết luận không phải F&B hoặc đã đóng cửa. Có thể tiếp tục xem xét đề xuất khác.
+
+Trạng thái phải gắn với đối chiếu/đề xuất cụ thể khi có; khi tổng hợp lên catalog phải truy được quyết định và không che các đề xuất mâu thuẫn. `match / non-match / review` tương ứng với VERIFIED / REJECTED_MATCH / REVIEW_REQUIRED cho đối chiếu Google; UNVERIFIED không phải non-match. Tập 725 ứng viên hiện có không phải hạn mức, không phải 725 cửa hàng đã xác minh và không bắt buộc được Google xác minh toàn bộ.
+
+Hai record Overture cùng được crawler chọn một Google `data_id` **không đủ để tự động gộp**. Phải có đánh giá dedup độc lập về chi nhánh; giữ xung đột nếu chưa đủ bằng chứng. `data_id` là mã quan sát nguồn, không mặc định là Google Place ID chính thức.
 
 ## 8. Kết quả cần bàn giao
 
 | Kết quả | Người sử dụng nhận được |
 |---|---|
 | **Danh mục cửa hàng thống nhất** | Mỗi chi nhánh có định danh ổn định, thông tin cơ bản và trạng thái dữ liệu |
-| **Liên kết nguồn** | Biết cửa hàng đến từ Overture, OSM hay cả hai; xem được bản ghi nguồn liên quan |
+| **Liên kết nguồn** | Truy được POI Overture và liên kết Google được chấp nhận khi có, cùng phiên bản/thời điểm; đề xuất chưa xác nhận không được trình bày như liên kết tin cậy |
 | **Danh sách cần xác minh** | Biết những cặp địa điểm chưa đủ bằng chứng để tự quyết định |
 | **Báo cáo chất lượng và độ phủ** | Số lượng nguồn, độ trùng, phần bổ sung, dữ liệu thiếu hoặc không hợp lệ |
 | **Kết quả tra cứu/phân tích** | Có thể sử dụng danh mục để trả lời các câu hỏi cơ bản về địa điểm F&B trong phạm vi pilot |
+| **Point Map và phân tích loại hình/khu vực** *(bắt buộc MVP)* | Bản đồ điểm và thống kê đối soát với catalog cùng phạm vi/phiên bản, thể hiện trạng thái chưa xác minh |
+| **Density Map** *(tùy chọn)* | Mật độ dữ liệu catalog quan sát với phạm vi và phương pháp được ghi rõ; không phải tổng thị trường |
 | **Báo cáo đánh giá gợi ý** *(giai đoạn sau)* | So sánh kết quả có/không sử dụng thông tin rút ra từ reviews |
 
 ## 9. Tiêu chí thành công của giai đoạn đầu
 
 Một pilot được xem là hoàn thành khi:
 
-1. **Có dữ liệu thật từ cả Overture và OSM** trong ranh giới đã xác minh; ghi rõ thời điểm và phạm vi của từng nguồn.
+1. **Có dữ liệu Overture thật và quan sát Google đã lưu được phép dùng** trong phạm vi pilot; ghi thời điểm/phạm vi từng nguồn. Không yêu cầu Google xác minh toàn bộ 725 ứng viên hoặc mọi canonical entry.
 2. **Có danh mục thống nhất:** mỗi cửa hàng đầu ra truy được về nguồn và giữ riêng các trường hợp chưa đủ bằng chứng để gộp.
 3. **Có kiểm chứng chất lượng đối chiếu:** chuẩn bị tập cặp được gán nhãn, báo cáo Precision/Recall/F1 trên tập đánh giá và giải thích các lỗi gộp nhầm/tách nhầm. Không dùng các chỉ số này để khẳng định độ phủ toàn bộ địa điểm thực tế.
-4. **Có báo cáo chất lượng và đóng góp của từng nguồn:** nêu rõ phần trùng, phần chỉ có ở một nguồn, dữ liệu thiếu và ngoại lệ.
+4. **Có báo cáo chất lượng và đóng góp của từng nguồn:** tách DQ, dedup trong nguồn và ER; nêu liên kết được chấp nhận, đề xuất bị bác bỏ/chưa xác định, phần chỉ có ở một nguồn, dữ liệu thiếu và mẫu số. Không suy ra độ phủ thị trường.
 5. **Có khả năng chạy lại:** cùng đầu vào và quy tắc cho kết quả logic nhất quán, không nhân đôi cửa hàng. Mọi thay đổi giữa các lần chạy phải có thể giải thích.
-6. **Có thể khai thác đầu ra:** người sử dụng truy vấn hoặc lọc được danh mục và xem được báo cáo pilot.
+6. **Có thể khai thác đầu ra:** người sử dụng truy vấn/lọc được danh mục, xem Point Map, phân tích loại hình/khu vực và báo cáo pilot có thể đối soát. Density Map không chặn nghiệm thu; reviews/sentiment/recommendation được hoãn.
 
 Các mục tiêu định lượng cụ thể về độ chính xác, thời gian xử lý và độ mới sẽ được đặt sau khi có dữ liệu khảo sát và baseline, thay vì ghi các con số chưa được đo.
 
@@ -116,7 +140,7 @@ Các mục tiêu định lượng cụ thể về độ chính xác, thời gian
 
 | Vấn đề | Cách xử lý hoặc giới hạn |
 |---|---|
-| Overture/OSM thiếu hoặc sai địa điểm | Đánh giá dữ liệu thực tế, giữ trạng thái chưa chắc chắn; không hứa bao phủ toàn bộ thị trường |
+| Overture/Google thiếu hoặc sai địa điểm | Đánh giá dữ liệu thực tế, giữ trạng thái chưa chắc chắn; không hứa bao phủ toàn bộ thị trường |
 | Gộp nhầm hai chi nhánh | Ưu tiên quyết định thận trọng, có tập kiểm chứng và danh sách cần xem xét |
 | Khác biệt về phân loại F&B và ranh giới địa lý | Xác nhận quy tắc phân loại và ranh giới trước khi so sánh hai nguồn |
 | Dữ liệu reviews có giới hạn quyền sử dụng | Chỉ tích hợp sau khi xác minh điều kiện của nguồn; nếu không, tiếp tục với danh mục POI |

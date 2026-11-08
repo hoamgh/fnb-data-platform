@@ -239,7 +239,7 @@ def _status_labels(driver):
         for label in (_text(element), _attr(element, 'aria-label')):
             if label and label not in labels:
                 normalized = _normalized_label(label)
-                if re.search(r'open|clos|mở cửa|đóng cửa|giờ.*khác|hours.*differ|holiday|special hours|ngày lễ', normalized):
+                if re.search(r'open|clos|mở cửa|đóng cửa|đóng vĩnh viễn|giờ.*khác|hours.*differ|holiday|special hours|ngày lễ', normalized):
                     labels.append(label)
     return labels
 
@@ -248,7 +248,7 @@ def _business_state(labels):
     closures, current = set(), set()
     for raw in labels:
         label = _normalized_label(raw)
-        if re.fullmatch(r'(?:permanently closed|(?:đã )?đóng cửa vĩnh viễn)', label):
+        if re.fullmatch(r'(?:permanently closed|(?:(?:đã|bị) )?đóng (?:cửa )?vĩnh viễn)', label):
             closures.add('CLOSED_PERMANENTLY')
         elif re.fullmatch(r'(?:temporarily closed|tạm thời đóng cửa|đóng cửa tạm thời)', label):
             closures.add('CLOSED_TEMPORARILY')

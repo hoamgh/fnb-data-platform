@@ -46,7 +46,8 @@ def test_resolver_forwards_address_without_bypassing_branch_checks(monkeypatch, 
     result = resolution.resolve_place(place, Driver())
     assert observed[0].expected_address == address
     assert observed[0].id == resolution.store_id(place)
-    assert observed[0].query == ' '.join(filter(None, [place.name, address, place.admin_area_name]))
+    from crawl_experiment.sources.google_maps.poi_input import search_plan
+    assert observed[0].query == search_plan(place.to_dict())['query']
     assert result['status'] == expected_status
     assert result['place_key'] == place.place_key
     assert asdict(place) == original

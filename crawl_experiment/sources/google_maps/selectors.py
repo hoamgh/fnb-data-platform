@@ -21,6 +21,21 @@ SEARCH_RESULT_CANDIDATES = (
     "div[role='feed'] a[href*='/maps/place/'], "
     "a.hfpxzc[href*='/maps/place/']"
 )
+SEARCH_RESULTS_FEED = "div[role='feed']"
+SEARCH_CARD_DETAILS_SCRIPT = """
+const link = arguments[0];
+const card = link.closest('[role="article"]') || link.closest('.Nv2PK');
+if (!card) return null;
+const explicit = card.querySelector('[data-item-id="address"], [data-address]');
+const title = card.querySelector('.qBF1Pd, .fontHeadlineSmall');
+return {text: card.innerText || '', name: title ? title.innerText : null,
+        lines: Array.from(card.querySelectorAll('.W4Efsd span')).map(n=>n.innerText || '').filter(Boolean),
+        address: explicit ? (explicit.getAttribute('data-address') || explicit.innerText) : null};
+"""
+SEARCH_SCROLL_SCRIPT = """
+const feed=arguments[0];
+feed.scrollBy(0, Math.max(feed.clientHeight * 0.8, 400));
+"""
 SIGN_IN_PROMPT = "a[data-action='sign in'], a[href*='ServiceLogin']"
 REVIEWS_TAB_CSS = (
     "button[jsaction*='pane.reviewChart'], "

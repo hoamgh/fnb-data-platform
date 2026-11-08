@@ -30,3 +30,13 @@ jobs:
           python -m pip install "httpx==0.28.1" "beautifulsoup4==4.15.0" "duckdb==1.5.5" "playwright==1.42.0" "psutil==7.2.2"
       - name: Run Foody, Google resolution, and browser fixture tests
         run: python -B -m pytest experiments/foody experiments/google_resolution experiments/browser_framework/test_benchmark.py -q -p no:cacheprovider --basetemp "${{ runner.temp }}/fnb-experiment-pytest"
+      - name: Run pipeline and address enrichment offline regressions
+        run: >-
+          python -B -m pytest
+          tests/test_overture_eligibility.py tests/test_spatial_prededup.py
+          tests/test_google_silver.py tests/test_comparison_features.py
+          tests/test_entity_resolution.py tests/test_entity_resolution_v2.py
+          tests/test_entity_resolution_v3.py tests/test_google_address_enrichment.py
+          tests/test_address_reference_pilot.py
+          tests/test_google_candidate_ranking.py tests/test_google_poi_input.py
+          -q -p no:cacheprovider --basetemp "${{ runner.temp }}/fnb-pipeline-pytest"

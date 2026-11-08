@@ -39,6 +39,27 @@ class _Driver:
         return [_Element(node) for node in self.soup.select(selector)]
 
 
+def test_passio_screenshot_label_bi_dong_vinh_vien():
+    # Text transcribed from the user's screenshot; not a captured live DOM.
+    driver = _Driver('''<div role="main">
+        <h1 class="DUwDvf">Cà Phê Passio Quận 4</h1>
+        <span>Bị đóng vĩnh viễn</span>
+        <button data-item-id="address">124 Khánh Hội, Hồ Chí Minh, Việt Nam</button>
+        <span>Bị đóng vĩnh viễn</span>
+    </div>''')
+    details = extract_place_details(driver, 'passio-screenshot-regression')
+    assert details['business_status'] == 'CLOSED_PERMANENTLY'
+    assert details['open_now'] is False
+    assert 'Bị đóng vĩnh viễn' in details['raw_status_labels']
+
+
+def test_closure_mentioned_only_in_review_is_not_business_evidence():
+    driver = _Driver('''<div role="main"><h1>Cà Phê Passio Quận 4</h1>
+        <div data-review-id="review"><span>Bị đóng vĩnh viễn</span></div>
+    </div>''')
+    assert extract_place_details(driver, 'review-only')['business_status'] == 'UNKNOWN'
+
+
 def test_vietnamese_storefront_fields_and_explicit_missing():
     driver = _Driver("""
         <div role="main">

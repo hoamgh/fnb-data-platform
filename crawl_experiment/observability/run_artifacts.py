@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 from crawl_experiment.core.failure_taxonomy import classify_exception, classify_status
 from crawl_experiment.core.models import Store
+from crawl_experiment.core.errors import PlaceResolutionError
 from crawl_experiment.core.statuses import CrawlStatus
 from crawl_experiment.orchestration.retry_policy import RetryAction, RetryDecision
 
@@ -173,6 +174,9 @@ class CrawlArtifacts:
             scroll_count=result.scroll_count, stop_reason=result.stop_reason,
             configured_max_scrolls=result.configured_max_scrolls,
             parse_errors=result.parse_errors, **timing,
+            business_status=getattr(result,'business_status',None),
+            review_collection_status=getattr(result,'review_collection_status',None),
+            review_collection_reason=getattr(result,'review_collection_reason',None),
         )
         if classification and not validation_limit_reached:
             self._emit_dlq(
@@ -198,6 +202,14 @@ class CrawlArtifacts:
         classification = classify_exception(error)
         concise_error = str(error).splitlines()[0]
         checkpoint = read_checkpoint(self.run_directory, store.id)
+        if isinstance(error,PlaceResolutionError):
+            self._write_store(store,status=str(decision.status),final_status=str(decision.status),
+                attempts_started=attempt_number,attempts=attempt_number,terminal=True,dlq=False,
+                normal_unresolved=True,resolution_error=concise_error,
+                failure_stage=None,failure_category=None,failure_reason_code=None,
+                reviews_seen=checkpoint.get('reviews_seen',0),
+                scroll_count=checkpoint.get('scroll_count',0),**timing)
+            return
         self._emit_dlq(
             store, status=str(decision.status), failure_stage=checkpoint.get("failure_stage"),
             classification=classification,
@@ -338,6 +350,9 @@ def build_summary(
                     "failure_reason_code", classification.reason_code if classification else None
                 ),
                 "reviews_seen": checkpoint.get("reviews_seen", 0),
+                "business_status": metadata.get("business_status"),
+                "review_collection_status": metadata.get("review_collection_status"),
+                "review_collection_reason": metadata.get("review_collection_reason"),
                 "reviews_persisted": persisted, "stop_reason": metadata.get("stop_reason"),
                 "configured_max_scrolls": metadata.get("configured_max_scrolls", max_scrolls),
                 "scroll_count": checkpoint.get("scroll_count", 0),
@@ -363,6 +378,16 @@ def build_summary(
                 "resolved_place_address": metadata.get("resolved_place_address"),
                 "resolved_url": metadata.get("resolved_url"),
                 "place_entity_confirmed": metadata.get("place_entity_confirmed", False),
+                "resolution_outcome": metadata.get("resolution_outcome"),
+                "resolution_reason": metadata.get("resolution_reason"),
+                "coordinate_distance_m": metadata.get("coordinate_distance_m"),
+                "identity_status": metadata.get("identity_status"),
+                "crawl_eligible": metadata.get("crawl_eligible"),
+                "selection_score": metadata.get("selection_score"),
+                "selection_policy_version": metadata.get("selection_policy_version"),
+                "candidate_rankings": metadata.get("candidate_rankings"),
+                "candidate_attempts": metadata.get("candidate_attempts"),
+                "search_scroll_count": metadata.get("search_scroll_count"),
                 "google_place_details_path": metadata.get("google_place_details_path"),
                 "google_place_details_field_count": metadata.get("google_place_details_field_count", 0),
                 "google_place_details_error": metadata.get("google_place_details_error"),

@@ -435,6 +435,25 @@ def test_failed_dispatch_is_terminal_and_never_reclaimed(tmp_path):
             ('FINISHED',), ('FINISHED',)]
 
 
+def test_interrupted_queue_keeps_checkpoint_and_resumes_only_pending(tmp_path):
+    from crawl_experiment.storage.checkpoint_repository import Checkpoint,CheckpointRepository
+    from crawl_experiment.core.statuses import CrawlStatus
+    queue=tmp_path/'dispatch.sqlite3'
+    workers.create_queue(queue,[place('first'),place('interrupted'),place('pending')])
+    index,_=workers.claim_next(queue,'worker-01')
+    workers.finish_dispatch(queue,index,'worker-01',dict(status='NO_REVIEWS',coverage='FULL'))
+    interrupted,_=workers.claim_next(queue,'worker-02')
+    repo=CheckpointRepository(tmp_path/'checkpoints')
+    repo.save(Checkpoint('interrupted',CrawlStatus.PARTIAL_LIMIT,reviews_seen=7,scroll_count=2))
+    before=(tmp_path/'checkpoints'/'interrupted.json').read_bytes()
+    # Reopening the same SQLite dispatch does not replay unknown browser work.
+    pending,_=workers.claim_next(queue,'worker-03')
+    assert pending!=interrupted and pending==2
+    assert repo.load('interrupted').reviews_seen==7
+    assert (tmp_path/'checkpoints'/'interrupted.json').read_bytes()==before
+    assert workers.claim_next(queue,'worker-04') is None
+
+
 def test_worker_integration_error_stops_without_replay(tmp_path):
     root = tmp_path/'run'
     directory = root/'worker-01'
