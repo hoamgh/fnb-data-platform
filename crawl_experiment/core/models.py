@@ -14,6 +14,13 @@ class Store:
     query: str
     retailer: str | None = None
     expected_address: str | None = None
+    expected_latitude: float | None = None
+    expected_longitude: float | None = None
+    branch_distance_limit_m: float = 50.0
+    search_eligible: bool = True
+    search_reason: str | None = None
+    geographic_context: str | None = None
+    expected_ward: str | None = None
 
 
 # Existing Store is the immutable per-place input job. An alias avoids changing
@@ -99,3 +106,6 @@ class CrawlResult:
     failure_stage: str | None = None
     error: str | None = None
     elapsed_seconds: float = 0.0
+    business_status: str | None = None
+    review_collection_status: str | None = None
+    review_collection_reason: str | None = None

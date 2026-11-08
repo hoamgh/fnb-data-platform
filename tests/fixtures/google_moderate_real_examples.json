@@ -1,0 +1,267 @@
+[
+  {
+    "source": {
+      "source_id": "overture:08f4c696-c81f-41fa-8000-cb8dea660dcb",
+      "name": "Trà Sữa SUN & MOON",
+      "address": "48 Đường Nguyễn Hữu Hào",
+      "latitude": 10.761843681335,
+      "longitude": 106.70081329346
+    },
+    "candidate": {
+      "text": "Sun & Moon Trà Sữa - Kem",
+      "address": "\nQP62+Q96, Nguyễn Hữu Hào, Khánh Hội, Hồ Chí Minh, Việt Nam",
+      "href": "https://www.google.com/maps/place/Sun+%26+Moon+Tr%C3%A0+S%E1%BB%AFa+-+Kem/@10.761917,106.7008967,17z/data=!3m1!4b1!4m6!3m5!1s0x31752f6b589196e5:0x518f128e17453659!8m2!3d10.761917!4d106.7008967!16s%2Fg%2F11mv12wf9n?entry=ttu&g_ep=EgoyMDI2MTEwMi4wIKXMDSoASAFQAw%3D%3D"
+    },
+    "provenance": {
+      "summary": "D:\\Projects\\integration-recomentdation-fnb-data-platform-20261028-pipeline\\output\\google-m2-full-v5\\worker-02\\job-13\\crawl\\20261105-043651\\summary.json",
+      "original_decision": false
+    },
+    "case": "same_street",
+    "new_evidence": {
+      "candidate_id": "0x31752f6b589196e5:0x518f128e17453659",
+      "name": "Sun & Moon Trà Sữa - Kem",
+      "address": "\nQP62+Q96, Nguyễn Hữu Hào, Khánh Hội, Hồ Chí Minh, Việt Nam",
+      "url": "https://www.google.com/maps/place/Sun+%26+Moon+Tr%C3%A0+S%E1%BB%AFa+-+Kem/@10.761917,106.7008967,17z/data=!3m1!4b1!4m6!3m5!1s0x31752f6b589196e5:0x518f128e17453659!8m2!3d10.761917!4d106.7008967!16s%2Fg%2F11mv12wf9n?entry=ttu&g_ep=EgoyMDI2MTEwMi4wIKXMDSoASAFQAw%3D%3D",
+      "name_similarity": 0.4722222222222222,
+      "address_compatibility": 0.85,
+      "distance_m": 12.226261000385087,
+      "geographic_score": 0.9388686949980746,
+      "available_weight": 1.0,
+      "house_number_left": "48",
+      "house_number_right": null,
+      "same_street": true,
+      "house_conflict": false,
+      "street_conflict": false,
+      "penalty": 0.0,
+      "base_score": 0.6933303042497112,
+      "score": 0.6933303042497112,
+      "crawl_eligible": true,
+      "identity_status": "IDENTITY_UNVERIFIED",
+      "unknown_signals": [],
+      "reason": "MODERATE_CRAWL_ELIGIBILITY"
+    },
+    "legacy_gate_pass": false
+  },
+  {
+    "source": {
+      "source_id": "overture:092ec8f2-6212-4e00-8e76-c183f8099d85",
+      "name": "Panda's Bakery",
+      "address": "538/106/3 Đoàn Văn Bơ",
+      "latitude": 10.75769441,
+      "longitude": 106.70840001
+    },
+    "candidate": {
+      "text": "Panda'sbakery",
+      "address": "\n538/106/3 Đoàn Văn Bơ, Khánh Hội, Hồ Chí Minh, Việt Nam",
+      "href": "https://www.google.com/maps/place/Panda'sbakery/@10.7578089,106.7085671,17z/data=!3m1!4b1!4m6!3m5!1s0x31752f64b1ec063b:0x7c7d78d1a2df798e!8m2!3d10.7578089!4d106.7085671!16s%2Fg%2F11fxymx_2q?entry=ttu&g_ep=EgoyMDI2MTEwMi4wIKXMDSoASAFQAw%3D%3D"
+    },
+    "provenance": {
+      "summary": "D:\\Projects\\integration-recomentdation-fnb-data-platform-20261028-pipeline\\output\\google-m2-full-v5\\worker-04\\job-14\\crawl\\20261105-043652\\summary.json",
+      "original_decision": true
+    },
+    "case": "name_variant_exact_address",
+    "new_evidence": {
+      "candidate_id": "0x31752f64b1ec063b:0x7c7d78d1a2df798e",
+      "name": "Panda'sbakery",
+      "address": "\n538/106/3 Đoàn Văn Bơ, Khánh Hội, Hồ Chí Minh, Việt Nam",
+      "url": "https://www.google.com/maps/place/Panda'sbakery/@10.7578089,106.7085671,17z/data=!3m1!4b1!4m6!3m5!1s0x31752f64b1ec063b:0x7c7d78d1a2df798e!8m2!3d10.7578089!4d106.7085671!16s%2Fg%2F11fxymx_2q?entry=ttu&g_ep=EgoyMDI2MTEwMi4wIKXMDSoASAFQAw%3D%3D",
+      "name_similarity": 0.9629629629629629,
+      "address_compatibility": 1.0,
+      "distance_m": 22.254107058473537,
+      "geographic_score": 0.8887294647076323,
+      "available_weight": 1.0,
+      "house_number_left": "538/106/3",
+      "house_number_right": "538/106/3",
+      "same_street": true,
+      "house_conflict": false,
+      "street_conflict": false,
+      "penalty": 0.0,
+      "base_score": 0.9666427530394781,
+      "score": 0.9666427530394781,
+      "crawl_eligible": true,
+      "identity_status": "IDENTITY_UNVERIFIED",
+      "unknown_signals": [],
+      "reason": "MODERATE_CRAWL_ELIGIBILITY"
+    },
+    "legacy_gate_pass": true
+  },
+  {
+    "source": {
+      "source_id": "overture:7d1deeeb-54b6-4bf8-bf5c-421a4686c0a0",
+      "name": "Cofee Sân Vườn Cây Mít",
+      "address": null,
+      "latitude": 10.75634187,
+      "longitude": 106.70368112
+    },
+    "candidate": {
+      "text": "Cofee Sân Vườn Cây Mít",
+      "address": "\nKhánh Hội, Hồ Chí Minh, Việt Nam",
+      "href": "https://www.google.com/maps/place/Cofee+S%C3%A2n+V%C6%B0%E1%BB%9Dn+C%C3%A2y+M%C3%ADt/@10.7562964,106.7036866,17z/data=!3m1!4b1!4m6!3m5!1s0x31752f6d89cb137d:0xeb9efa48651f0b84!8m2!3d10.7562964!4d106.7036866!16s%2Fg%2F11nym4dq9p?entry=ttu&g_ep=EgoyMDI2MTEwMi4wIKXMDSoASAFQAw%3D%3D"
+    },
+    "provenance": {
+      "summary": "D:\\Projects\\integration-recomentdation-fnb-data-platform-20261028-pipeline\\output\\google-m2-full-v5\\worker-04\\job-303\\crawl\\20261105-050110\\summary.json",
+      "original_decision": false
+    },
+    "case": "missing_address",
+    "new_evidence": {
+      "candidate_id": "0x31752f6d89cb137d:0xeb9efa48651f0b84",
+      "name": "Cofee Sân Vườn Cây Mít",
+      "address": "\nKhánh Hội, Hồ Chí Minh, Việt Nam",
+      "url": "https://www.google.com/maps/place/Cofee+S%C3%A2n+V%C6%B0%E1%BB%9Dn+C%C3%A2y+M%C3%ADt/@10.7562964,106.7036866,17z/data=!3m1!4b1!4m6!3m5!1s0x31752f6d89cb137d:0xeb9efa48651f0b84!8m2!3d10.7562964!4d106.7036866!16s%2Fg%2F11nym4dq9p?entry=ttu&g_ep=EgoyMDI2MTEwMi4wIKXMDSoASAFQAw%3D%3D",
+      "name_similarity": 1.0,
+      "address_compatibility": null,
+      "distance_m": 5.091357043119674,
+      "geographic_score": 0.9745432147844016,
+      "available_weight": 0.6,
+      "house_number_left": null,
+      "house_number_right": null,
+      "same_street": false,
+      "house_conflict": false,
+      "street_conflict": false,
+      "penalty": 0.0,
+      "base_score": 0.9936358036961006,
+      "score": 0.9936358036961006,
+      "crawl_eligible": true,
+      "identity_status": "IDENTITY_UNVERIFIED",
+      "unknown_signals": [
+        "address"
+      ],
+      "reason": "MODERATE_CRAWL_ELIGIBILITY"
+    },
+    "legacy_gate_pass": false
+  },
+  {
+    "source": {
+      "source_id": "overture:9f15e618-19a8-49df-a99a-a3b3a8747c93",
+      "name": "Quán Khánh Hào Kin Sushi",
+      "address": "122 Đ. Vĩnh Khánh",
+      "latitude": 10.7607091,
+      "longitude": 106.70444308
+    },
+    "candidate": {
+      "text": "Quán Khánh Hào Kin Sushi",
+      "address": "\n122 Đ. Vĩnh Khánh, Khánh Hội, Hồ Chí Minh, Việt Nam",
+      "href": "https://www.google.com/maps/place/Qu%C3%A1n+Kh%C3%A1nh+H%C3%A0o+Kin+Sushi/@10.7606477,106.7044707,17z/data=!3m1!4b1!4m6!3m5!1s0x31752fe8d35d4a99:0xa9e887761fa2fa30!8m2!3d10.7606477!4d106.7044707!16s%2Fg%2F11hz0wk8_b?entry=ttu&g_ep=EgoyMDI2MTEwMi4wIKXMDSoASAFQAw%3D%3D",
+      "business_status": "CLOSED_TEMPORARILY"
+    },
+    "provenance": {
+      "summary": "D:\\Projects\\integration-recomentdation-fnb-data-platform-20261028-pipeline\\output\\google-m2-full-v5\\worker-03\\job-406\\crawl\\20261105-050948\\summary.json",
+      "original_decision": true
+    },
+    "case": "closed_store",
+    "new_evidence": {
+      "candidate_id": "0x31752fe8d35d4a99:0xa9e887761fa2fa30",
+      "name": "Quán Khánh Hào Kin Sushi",
+      "address": "\n122 Đ. Vĩnh Khánh, Khánh Hội, Hồ Chí Minh, Việt Nam",
+      "url": "https://www.google.com/maps/place/Qu%C3%A1n+Kh%C3%A1nh+H%C3%A0o+Kin+Sushi/@10.7606477,106.7044707,17z/data=!3m1!4b1!4m6!3m5!1s0x31752fe8d35d4a99:0xa9e887761fa2fa30!8m2!3d10.7606477!4d106.7044707!16s%2Fg%2F11hz0wk8_b?entry=ttu&g_ep=EgoyMDI2MTEwMi4wIKXMDSoASAFQAw%3D%3D",
+      "name_similarity": 1.0,
+      "address_compatibility": 1.0,
+      "distance_m": 7.464355443750367,
+      "geographic_score": 0.9626782227812481,
+      "available_weight": 1.0,
+      "house_number_left": "122",
+      "house_number_right": "122",
+      "same_street": true,
+      "house_conflict": false,
+      "street_conflict": false,
+      "penalty": 0.0,
+      "base_score": 0.9944017334171873,
+      "score": 0.9944017334171873,
+      "crawl_eligible": true,
+      "identity_status": "IDENTITY_UNVERIFIED",
+      "unknown_signals": [],
+      "reason": "MODERATE_CRAWL_ELIGIBILITY"
+    },
+    "legacy_gate_pass": true
+  },
+  {
+    "source": {
+      "source_id": "21322427-e2f2-4475-8589-5faaa56ee952",
+      "name": "Highlands Coffee",
+      "address": "182 Bến Vân Đồn",
+      "latitude": 10.76168869,
+      "longitude": 106.69780599
+    },
+    "candidate": {
+      "text": "Highlands Coffee 384 Hoàng Diệu HCM",
+      "address": "\nT.03-TMDV Chung cư H3, 384 Hoàng Diệu, Khánh Hội, Hồ Chí Minh 70000, Việt Nam",
+      "href": "https://www.google.com/maps/place/Highlands+Coffee+384+Ho%C3%A0ng+Di%E1%BB%87u+HCM/@10.7603234,106.6990936,17z/data=!3m1!4b1!4m6!3m5!1s0x31752fc3a4194909:0xce31ae07f2fcd59c!8m2!3d10.7603234!4d106.6990936!16s%2Fg%2F11zgmcc91m?entry=ttu&g_ep=EgoyMDI2MTEwMi4wIKXMDSoASAFQAw%3D%3D"
+    },
+    "provenance": {
+      "summary": "D:\\Projects\\integration-recomentdation-fnb-data-platform-20261028-pipeline\\output\\google-m2-full-v5\\worker-01\\job-123\\crawl\\20261105-044615\\summary.json",
+      "original_decision": false,
+      "negative_control": "Cross-pair of actual saved branches, not observed selection"
+    },
+    "case": "same_brand_different_branch",
+    "new_evidence": {
+      "candidate_id": "0x31752fc3a4194909:0xce31ae07f2fcd59c",
+      "name": "Highlands Coffee 384 Hoàng Diệu HCM",
+      "address": "\nT.03-TMDV Chung cư H3, 384 Hoàng Diệu, Khánh Hội, Hồ Chí Minh 70000, Việt Nam",
+      "url": "https://www.google.com/maps/place/Highlands+Coffee+384+Ho%C3%A0ng+Di%E1%BB%87u+HCM/@10.7603234,106.6990936,17z/data=!3m1!4b1!4m6!3m5!1s0x31752fc3a4194909:0xce31ae07f2fcd59c!8m2!3d10.7603234!4d106.6990936!16s%2Fg%2F11zgmcc91m?entry=ttu&g_ep=EgoyMDI2MTEwMi4wIKXMDSoASAFQAw%3D%3D",
+      "name_similarity": 0.6274509803921569,
+      "address_compatibility": 0.21875,
+      "distance_m": 206.9590418447483,
+      "geographic_score": 0,
+      "available_weight": 1.0,
+      "house_number_left": "182",
+      "house_number_right": null,
+      "same_street": false,
+      "house_conflict": false,
+      "street_conflict": true,
+      "penalty": 0.35,
+      "base_score": 0.3698529411764706,
+      "score": 0.01985294117647063,
+      "crawl_eligible": false,
+      "identity_status": "IDENTITY_UNVERIFIED",
+      "unknown_signals": [],
+      "reason": "INSUFFICIENT_OR_CONTRADICTING_EVIDENCE"
+    },
+    "legacy_gate_pass": false
+  },
+  {
+    "source": {
+      "source_id": "c052c73b-52db-4620-896e-96bd647c8ffc",
+      "name": "Bi Drinkies",
+      "address": "48 Đường Số 1",
+      "latitude": 10.7563698,
+      "longitude": 106.7035082
+    },
+    "candidate": {
+      "text": "Cofee Sân Vườn Cây Mít",
+      "address": "\nKhánh Hội, Hồ Chí Minh, Việt Nam",
+      "href": "https://www.google.com/maps/place/Cofee+S%C3%A2n+V%C6%B0%E1%BB%9Dn+C%C3%A2y+M%C3%ADt/@10.7562964,106.7036866,17z/data=!3m1!4b1!4m6!3m5!1s0x31752f6d89cb137d:0xeb9efa48651f0b84!8m2!3d10.7562964!4d106.7036866!16s%2Fg%2F11nym4dq9p?entry=ttu&g_ep=EgoyMDI2MTEwMi4wIKXMDSoASAFQAw%3D%3D"
+    },
+    "provenance": {
+      "summary": "D:\\Projects\\integration-recomentdation-fnb-data-platform-20261028-pipeline\\output\\google-m2-full-v5\\worker-04\\job-303\\crawl\\20261105-050110\\summary.json",
+      "original_decision": false,
+      "negative_control": "Actual saved records cross-paired; not verified evaluation labels"
+    },
+    "case": "unrelated_nearby_negative_control",
+    "new_evidence": {
+      "candidate_id": "0x31752f6d89cb137d:0xeb9efa48651f0b84",
+      "name": "Cofee Sân Vườn Cây Mít",
+      "address": "\nKhánh Hội, Hồ Chí Minh, Việt Nam",
+      "url": "https://www.google.com/maps/place/Cofee+S%C3%A2n+V%C6%B0%E1%BB%9Dn+C%C3%A2y+M%C3%ADt/@10.7562964,106.7036866,17z/data=!3m1!4b1!4m6!3m5!1s0x31752f6d89cb137d:0xeb9efa48651f0b84!8m2!3d10.7562964!4d106.7036866!16s%2Fg%2F11nym4dq9p?entry=ttu&g_ep=EgoyMDI2MTEwMi4wIKXMDSoASAFQAw%3D%3D",
+      "name_similarity": 0.09090909090909091,
+      "address_compatibility": null,
+      "distance_m": 21.12868792752477,
+      "geographic_score": 0.8943565603623762,
+      "available_weight": 0.6,
+      "house_number_left": "48",
+      "house_number_right": null,
+      "same_street": false,
+      "house_conflict": false,
+      "street_conflict": false,
+      "penalty": 0.0,
+      "base_score": 0.2917709582724123,
+      "score": 0.2917709582724123,
+      "crawl_eligible": false,
+      "identity_status": "IDENTITY_UNVERIFIED",
+      "unknown_signals": [
+        "address"
+      ],
+      "reason": "INSUFFICIENT_OR_CONTRADICTING_EVIDENCE"
+    },
+    "legacy_gate_pass": false
+  }
+]

@@ -1,9 +1,11 @@
 import logging
 import re
 import time
+import unicodedata
 from enum import StrEnum
 
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import ElementClickInterceptedException, StaleElementReferenceException, ElementNotInteractableException
 
 from crawl_experiment.core.errors import (
     AuthRequiredError,
@@ -18,8 +20,12 @@ logger = logging.getLogger(__name__)
 
 SORT_BUTTON_FALLBACKS = (
     "div[role='main'] button[aria-label*='Sort' i]",
+    "div[role='main'] button[jsaction*='sort' i]",
+    "div[role='main'] [role='button'][aria-label*='Sắp xếp' i]",
+    "div[role='main'] [role='button'][aria-label*='Sort' i]",
     "div[role='main'] [data-review-id] button[aria-haspopup='true']",
     "div[role='main'] button[aria-haspopup='true']",
+    "div[role='main'] button, div[role='main'] [role='button']",
     "button[aria-label*='Sort' i]",
     "button[aria-haspopup='true']",
 )
@@ -39,18 +45,27 @@ SORT_OPTION_FALLBACKS = (
 )
 AUTH_DIALOG_SELECTOR = "[role='dialog'], [aria-modal='true']"
 MAIN_SURFACE_SELECTOR = "[role='main']"
-AUTH_REVIEW_TERMS = ("review", "sort", "continue", "account")
+AUTH_REVIEW_TERMS = (
+    "review", "sort", "continue", "account", "đánh giá", "sắp xếp", "tiếp tục", "tài khoản",
+)
 LIMITED_REVIEW_TERMS = (
     "limited review view",
     "limited view",
     "some reviews aren't available",
     "some reviews are not available",
     "sign in to see all reviews",
+    "đăng nhập để xem tất cả bài đánh giá",
+    "đăng nhập để xem thêm bài đánh giá",
+    "một số bài đánh giá không có sẵn",
 )
 NO_REVIEWS_TERMS = (
     "no reviews",
     "no reviews yet",
     "be the first to review",
+    "chưa có bài đánh giá",
+    "chưa có đánh giá",
+    "không có bài đánh giá nào",
+    "hãy là người đầu tiên đánh giá",
 )
 
 
@@ -63,7 +78,7 @@ class ReviewSurfaceState(StrEnum):
 
 
 def _normalized(value: str | None) -> str:
-    return " ".join((value or "").split()).casefold()
+    return unicodedata.normalize("NFC", " ".join((value or "").split()).casefold())
 
 
 def _menu_item_details(element) -> dict[str, object]:
@@ -151,30 +166,109 @@ class ReviewSurface:
         self.sleeper = sleeper
         self._last_pane = None
         self._last_sort_selector = None
+        self.advertised_review_count = None
+        self.last_control_diagnostics = {}
+
+    def _review_controls(self):
+        """Historical CSS → XPath fallback plus visible localized text labels."""
+        controls=[];seen=set()
+        inventory=[];lookup_counts={}
+        lookups=[('css selector',s) for s in (
+            "[role='main'] [role='tablist'] [role='tab'], [role='main'] [role='tablist'] button, [role='main'] [role='tablist'] [role='button']",
+            "[role='main'] [role='tab'], [role='main'] button, [role='main'] [role='button']", "[role='tab']", selectors.REVIEWS_TAB_CSS)]
+        lookups.append(('xpath',selectors.REVIEWS_TAB_XPATH))
+        # Maps sometimes renders the visible entry as a link or a nested span
+        # without button/tab semantics. Native click on its text bubbles to the
+        # enclosing control; successful pane resolution remains mandatory.
+        text_fallback=("[role='main'] span:not([data-review-id] *):not([role='feed'] *), "
+                       "[role='main'] a:not([data-review-id] *):not([role='feed'] *)")
+        lookups.append(('css selector',text_fallback))
+        for by,selector in lookups:
+            try: found=self.driver.find_elements(by,selector)
+            except StaleElementReferenceException: continue
+            lookup_counts[by+':'+selector]=len(found)
+            for button in found:
+                try:
+                    if not self._button_is_viable(button):continue
+                    labels=[re.sub(r'^[^\w]+','',_normalized(v)) for v in
+                            (getattr(button,'text',''),button.get_attribute('aria-label'))]
+                    if len(inventory)<40:
+                        inventory.append(dict(text=labels[0],aria_label=labels[1],role=button.get_attribute('role')))
+                    if any(re.search(r'\b(?:write|viết)\b',label) for label in labels):continue
+                    action=_normalized(button.get_attribute('jsaction'))
+                    labeled=any(re.fullmatch(r'(?:[\d.,]+\s+)?(?:bài đánh giá|đánh giá|reviews?)(?:\s*[\d.,()]+)?',label)
+                                for label in labels if label)
+                    fallback=by=='xpath' and any(re.search(r'\breviews?\b|bài đánh giá|đánh giá',label) for label in labels)
+                    if not labeled and not fallback and not any(term in action for term in ('pane.reviewchart','pane.rating.morereviews')):continue
+                    if selector==text_fallback:
+                        if controls:continue  # Prefer the established controls.
+                        write_ancestors=button.find_elements('xpath',
+                            "ancestor::*[self::button or self::a or @role='button' or @role='tab']"
+                            "[contains(.,'Viết') or contains(.,'viết') or contains(.,'Write') or contains(.,'write') "
+                            "or contains(@aria-label,'Viết') or contains(@aria-label,'viết') "
+                            "or contains(@aria-label,'Write') or contains(@aria-label,'write')]")
+                        if write_ancestors:continue
+                    role=_normalized(button.get_attribute('role'))
+                    key=getattr(button,'id',None) or (tuple(labels),role,action)
+                    if key in seen:continue
+                    seen.add(key);controls.append((role!='tab',button))
+                    if role=='tab' or selector==lookups[0][1]:
+                        self.last_control_diagnostics=dict(lookup_counts=lookup_counts,
+                            visible_control_sample=inventory,matched_review_controls=1,
+                            detection_path='TOP_TAB_FAST_PATH')
+                        return [button]
+                except StaleElementReferenceException: continue
+            if controls:
+                self.last_control_diagnostics=dict(lookup_counts=lookup_counts,
+                    visible_control_sample=inventory,matched_review_controls=len(controls),
+                    detection_path='FIRST_MATCHING_LOOKUP')
+                return [button for _,button in sorted(controls,key=lambda pair:pair[0])]
+        self.last_control_diagnostics=dict(lookup_counts=lookup_counts,visible_control_sample=inventory,
+                                          matched_review_controls=len(controls))
+        return [button for _,button in sorted(controls,key=lambda pair:pair[0])]
 
     def open_reviews(self):
         try:
-            buttons = self.driver.find_elements("css selector", selectors.REVIEWS_TAB_CSS)
-            if not buttons:
-                buttons = self.driver.find_elements("xpath", selectors.REVIEWS_TAB_XPATH)
-            if not buttons:
-                raise ReviewSurfaceError("Reviews tab not found")
-            selected = _normalized(buttons[0].get_attribute("aria-selected")) == "true"
-            if not selected:
-                buttons[0].click()
-            else:
-                logger.info("Reviews tab already selected; reacquiring pane without click")
-            return self.resolve_review_pane()
-        except ReviewSurfaceError:
-            raise
+            deadline=self.clock()+self.render_wait
+            for attempt in range(3):
+                buttons=self._review_controls()
+                if not buttons and self._safe_find(selectors.REVIEW_CARD):
+                    logger.info('Review cards already open; reacquiring pane without another tab click')
+                    return self.resolve_review_pane()
+                while not buttons and self.clock()<deadline:
+                    state,evidence=self.classify_state()
+                    if state is ReviewSurfaceState.AUTH_REQUIRED:
+                        raise AuthRequiredError(f'Reviews require authentication: {evidence}')
+                    if state is ReviewSurfaceState.LIMITED:
+                        raise LimitedReviewViewError(f'Reviews limited: {evidence}')
+                    self.sleeper(self.render_poll)
+                    buttons=self._review_controls()
+                if not buttons:raise ReviewSurfaceError('Reviews tab not found')
+                try:
+                    button=buttons[0]
+                    logger.info('Reviews control attempt=%s text=%r aria_label=%r role=%r',attempt+1,
+                                getattr(button,'text',''),button.get_attribute('aria-label'),button.get_attribute('role'))
+                    if _normalized(button.get_attribute('aria-selected'))=='true':
+                        logger.info('Reviews tab already selected; reacquiring pane without click')
+                        return self.resolve_review_pane()
+                    self._scroll_into_view(button)
+                    self._wait_until_control_stable(button)
+                    button.click()
+                    return self.resolve_review_pane()
+                except (ElementClickInterceptedException,StaleElementReferenceException,ElementNotInteractableException) as exc:
+                    logger.info('Reviews control recovery attempt=%s kind=%s',attempt+1,type(exc).__name__)
+                    if attempt==2 or self.clock()>=deadline:raise
+                    self.sleeper(self.retry_delay)
+        except ReviewSurfaceError:raise
         except Exception as exc:
-            raise ReviewSurfaceError(str(exc).splitlines()[0]) from exc
+            error=ReviewSurfaceError(str(exc).splitlines()[0])
+            error.local_review_tab_click_intercepted=isinstance(exc,ElementClickInterceptedException)
+            raise error from exc
 
     def prepare_and_classify(self):
         """Open Reviews when possible, then classify before sort is attempted."""
         initial_state, initial = self.classify_state()
         if initial_state in {
-            ReviewSurfaceState.NO_REVIEWS,
             ReviewSurfaceState.LIMITED,
             ReviewSurfaceState.AUTH_REQUIRED,
         }:
@@ -189,6 +283,9 @@ class ReviewSurface:
         except ReviewSurfaceError as exc:
             state, evidence = self.classify_state()
             evidence["open_error"] = str(exc).splitlines()[0]
+            evidence['control_lookup']=self.last_control_diagnostics
+            if getattr(exc, 'local_review_tab_click_intercepted', False):
+                evidence['open_error_code'] = 'REVIEW_TAB_CLICK_INTERCEPTED'
             logger.info(
                 "Review surface classified state=%s evidence=%s", state, evidence
             )
@@ -203,14 +300,14 @@ class ReviewSurface:
         return state, pane, evidence
 
     def classify_state(self, pane=None):
-        review_tabs = self._safe_find(selectors.REVIEWS_TAB_CSS)
+        review_tabs = self._review_controls()
         cards = self._cards_for_classification(pane)
         auth_dialogs = self._visible_elements(AUTH_DIALOG_SELECTOR)
         auth_texts = [self._element_text(element) for element in auth_dialogs]
         auth_evidence = [
             text
             for text in auth_texts
-            if "sign in" in text
+            if ("sign in" in text or "đăng nhập" in text)
             and any(term in text for term in AUTH_REVIEW_TERMS)
         ]
         main_text = " ".join(
@@ -220,9 +317,9 @@ class ReviewSurface:
         limited_evidence = [
             term for term in LIMITED_REVIEW_TERMS if term in main_text
         ]
-        no_reviews_evidence = [
-            term for term in NO_REVIEWS_TERMS if term in main_text
-        ]
+        review_text=self._element_text(pane) if pane is not None else main_text
+        no_reviews_evidence = [term for term in NO_REVIEWS_TERMS if term in review_text]
+        positive_count=isinstance(self.advertised_review_count,(int,float)) and self.advertised_review_count>0
         sort_button = self._find_sort_button() if pane is not None else None
         sort_control = bool(
             sort_button
@@ -237,6 +334,8 @@ class ReviewSurface:
             "auth_dialog_evidence": auth_evidence,
             "limited_evidence": limited_evidence,
             "no_reviews_evidence": no_reviews_evidence,
+            "advertised_review_count": self.advertised_review_count,
+            "no_reviews_count_conflict": bool(no_reviews_evidence and positive_count),
             "header_sign_in_ignored": bool(
                 self._safe_find(selectors.SIGN_IN_PROMPT)
             ),
@@ -245,7 +344,7 @@ class ReviewSurface:
             return ReviewSurfaceState.AUTH_REQUIRED, evidence
         if limited_evidence and (cards or review_tabs):
             return ReviewSurfaceState.LIMITED, evidence
-        if no_reviews_evidence and not cards:
+        if no_reviews_evidence and not cards and not positive_count and (pane is not None or not review_tabs):
             return ReviewSurfaceState.NO_REVIEWS, evidence
         if pane is not None and cards and sort_control:
             return ReviewSurfaceState.FULL, evidence
@@ -325,6 +424,7 @@ class ReviewSurface:
                     scrollHeight: pane.scrollHeight,
                     clientHeight: pane.clientHeight,
                     scrollTop: pane.scrollTop,
+                    searchFeed: !!pane.closest('[role="feed"]'),
                 };
                 """,
                 pane,
@@ -339,6 +439,11 @@ class ReviewSurface:
             )
         except Exception as exc:  # noqa: BLE001 - stale element during Maps re-render
             return None, {"selector": selector, "stale": True, "error": str(exc)}
+        if metrics.get('searchFeed') is True:
+            return None, {'selector':selector,'rejected':'SEARCH_RESULTS_FEED_NOT_REVIEWS'}
+        feed_children=pane_find('css selector',selectors.SEARCH_RESULTS_FEED) if pane_find else []
+        if feed_children and not cards:
+            return None, {'selector':selector,'rejected':'SEARCH_RESULTS_FEED_NOT_REVIEWS'}
         overflow = scroll_height > client_height
         plausible_size = visible and client_height >= 100
         dimensions_valid = scroll_height >= client_height
@@ -474,13 +579,10 @@ class ReviewSurface:
             if sort_labeled:
                 self._last_sort_selector = css_selector
                 return sort_labeled[0]
-            if css_selector == selectors.SORT_BUTTON and viable:
-                self._last_sort_selector = css_selector
-                return viable[0]
 
         for xpath_selector in (selectors.SORT_BUTTON_XPATH,):
             candidates = self.driver.find_elements("xpath", xpath_selector)
-            viable = [button for button in candidates if self._button_is_viable(button)]
+            viable = [button for button in candidates if self._button_is_viable(button) and self._is_sort_labeled(button)]
             if viable:
                 self._last_sort_selector = xpath_selector
                 return viable[0]
@@ -488,13 +590,24 @@ class ReviewSurface:
 
     @staticmethod
     def _is_sort_labeled(button) -> bool:
-        label = _normalized(button.get_attribute("aria-label"))
-        if any(token in label for token in NEGATIVE_BUTTON_LABELS):
-            return False
-        return any(
-            token in label
-            for token in ("sort", "sắp xếp", "trier", "orden", "sortieren")
+        labels = " ".join(
+            _normalized(value)
+            for value in (
+                button.get_attribute("aria-label"),
+                button.get_attribute("title"),
+                button.get_attribute("data-tooltip"),
+                button.get_attribute("data-value"),
+                getattr(button, "text", ""),
+            )
+            if value
         )
+        if any(re.search(r'(?<!\w)'+re.escape(term)+r'(?!\w)', labels) for term in (
+            "sort", "sắp xếp", "trier", "orden", "sortieren",
+            "mới nhất", "phù hợp nhất", "liên quan nhất",
+        )):
+            return True
+        jsaction = _normalized(button.get_attribute("jsaction"))
+        return bool(re.search(r'\breviewsort\b|\breview\w*[.:;]sort\b',jsaction))
 
     @staticmethod
     def _button_is_viable(button) -> bool:
@@ -712,10 +825,24 @@ class ReviewSurface:
     @staticmethod
     def _relative_age_seconds(label):
         text = _normalized(label)
-        if text in {"just now", "today"}:
+        if text in {"just now", "today", "vừa xong", "hôm nay"}:
             return 0
-        if text == "yesterday":
+        if text in {"yesterday", "hôm qua"}:
             return 86400
+        vietnamese = re.fullmatch(
+            r"(?:(\d+)|một)\s+(phút|giờ|ngày|tuần|tháng|năm)\s+trước",
+            text,
+        )
+        if vietnamese:
+            amount = int(vietnamese.group(1)) if vietnamese.group(1) else 1
+            return amount * {
+                "phút": 60,
+                "giờ": 3600,
+                "ngày": 86400,
+                "tuần": 7 * 86400,
+                "tháng": 30 * 86400,
+                "năm": 365 * 86400,
+            }[vietnamese.group(2)]
         match = re.fullmatch(
             r"(?:(\d+)|a|an|one)\s+"
             r"(minute|hour|day|week|month|year)s?\s+ago",
@@ -763,9 +890,10 @@ class ReviewSurface:
                         getattr(button, "text", ""),
                     ),
                 )
-            ).casefold()
+            )
         except Exception:  # noqa: BLE001 - control may rerender
             return False
+        state = _normalized(state)
         return any(target in state for target in newest_labels)
 
     def _interactive_sort_control_confirmed(self, button) -> bool:
