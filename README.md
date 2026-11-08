@@ -130,7 +130,7 @@ python -m pip install -e ".[test]"
 python -B scripts/run_offline_tests.py
 ```
 
-The socket-blocked baseline selects four core test modules. To exercise Silver, comparison features, ER V3 and enrichment:
+The offline runner selects the core modules and available source experiment suites, blocks external networking and permits local Playwright driver sockets. To exercise Silver, comparison features, ER V3 and enrichment:
 
 ```powershell
 python -B -m pytest tests/test_google_silver.py tests/test_comparison_features.py tests/test_entity_resolution_v3.py tests/test_google_address_enrichment.py -q
