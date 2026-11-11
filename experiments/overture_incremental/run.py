@@ -6,8 +6,10 @@ Never modifies existing Bronze or cached input files.
 from __future__ import annotations
 
 import csv
+import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import sys
@@ -22,7 +24,8 @@ from shapely.geometry import shape
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
-from fnb_platform.overture_incremental import compare_releases  # noqa: E402
+from fnb_platform.overture_incremental import compare_releases, selected_comparison_schema  # noqa: E402
+from fnb_platform.overture_snapshot import validate_snapshot, validate_pair_scope  # noqa: E402
 
 OLD = ROOT / "data/bronze/overture/places.parquet"
 OLD_META = ROOT / "data/bronze/overture/source_metadata.json"
@@ -34,6 +37,31 @@ FIELDS = ("id", "names", "basic_category", "taxonomy", "operating_status", "addr
 BUSINESS_FIELDS = frozenset({"names", "basic_category", "taxonomy", "operating_status", "addresses", "geometry"})
 FNB_CATEGORIES = {"restaurant", "coffee_shop", "cafe", "diner", "bakery", "bubble_tea_shop", "fast_food_restaurant", "food_and_drink", "bar", "pub", "ice_cream_shop", "juice_bar", "tea_house", "dessert_shop", "seafood_restaurant"}
 BUFFER_DEGREES = 0.003  # documented approximation, not an exact 300 m geodesic buffer
+BOUNDARY_ARTIFACT = "boundary.geojson"
+
+
+def boundary_polygon(content):
+    """Parse the exact pinned GeoJSON bytes, using the existing covers semantics."""
+    document = json.loads(content)
+    if document.get("type") == "FeatureCollection" and len(document.get("features", [])) == 1:
+        feature = document["features"][0]
+    elif document.get("type") == "Feature":
+        feature = document
+    else:
+        raise ValueError("Boundary must contain exactly one GeoJSON feature")
+    for item in (document, feature):
+        crs = item.get("crs")
+        if crs and crs.get("properties", {}).get("name") not in (
+            "EPSG:4326", "urn:ogc:def:crs:OGC:1.3:CRS84", "urn:ogc:def:crs:EPSG::4326",
+        ):
+            raise ValueError("Boundary must use WGS84 coordinates")
+    polygon = shape(feature["geometry"])
+    if not polygon.is_valid or polygon.is_empty or polygon.geom_type not in ("Polygon", "MultiPolygon"):
+        raise ValueError("Invalid pilot polygon")
+    w, s, e, n = polygon.bounds
+    if not all(math.isfinite(v) for v in polygon.bounds) or not (-180 <= w <= e <= 180 and -90 <= s <= n <= 90):
+        raise ValueError("Boundary coordinates must be WGS84 longitude/latitude")
+    return polygon
 
 
 def checksum(path):
@@ -146,36 +174,53 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def main(destination=DEST):
+def main(destination=DEST, *, old_path=None, old_metadata=None, new_path=None,
+         new_metadata=None, ward_path=None):
     started = time.perf_counter()
     destination = Path(destination)
+    # No-argument invocation remains the frozen historical benchmark. Explicit
+    # snapshots use validated release labels without changing historical paths.
+    frozen = all(p is None for p in (old_path, old_metadata, new_path, new_metadata, ward_path))
+    if not frozen and any(p is None for p in (old_path, old_metadata, new_path, new_metadata, ward_path)):
+        raise ValueError("Explicit mode requires OLD/NEW snapshots, metadata and ward")
+    old_path, old_metadata, new_path, new_metadata, ward_path = map(Path,
+        (OLD, OLD_META, NEW, NEW_META, WARD) if frozen else
+        (old_path, old_metadata, new_path, new_metadata, ward_path))
+    meta_old = validate_snapshot(old_path, old_metadata,
+        expected_release="2026-09-23.1" if frozen else None)
+    meta_new = validate_snapshot(new_path, new_metadata,
+        expected_release="2026-10-21.0" if frozen else None)
+    schema, schema_policy = selected_comparison_schema(
+        pq.read_schema(old_path), pq.read_schema(new_path), FIELDS)
+    boundary_bytes = ward_path.read_bytes()
+    polygon = boundary_polygon(boundary_bytes)
+    buffer = polygon.buffer(BUFFER_DEGREES)
+    validate_pair_scope(meta_old, meta_new, required_bbox=buffer.bounds)
+    comparison_bbox = [106.693, 10.749, 106.715, 10.769] if frozen else list(buffer.bounds)
+    if frozen:
+        w, s, e, n = comparison_bbox
+        a, b, c, d = buffer.bounds
+        if not (w <= a and s <= b and e >= c and n >= d):
+            raise ValueError("Frozen benchmark boundary exceeds historical extraction scope")
+        validate_pair_scope(meta_old, meta_new, required_bbox=comparison_bbox)
+    input_hashes = {"old": meta_old["artifact_sha256"], "new": meta_new["artifact_sha256"],
+                    "polygon": hashlib.sha256(boundary_bytes).hexdigest()}
     if destination.exists():
         manifest_path = destination / "manifest.json"
         if not manifest_path.exists():
             raise ValueError("Existing incomplete destination; never overwrite")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if (manifest["input_sha256"] != input_hashes or
+                manifest["old_release"] != meta_old["source_release"] or
+                manifest["new_release"] != meta_new["source_release"]):
+            raise ValueError("Existing comparison input/release mismatch; never overwrite")
         for file, digest in manifest["output_sha256"].items():
             if checksum(destination / file) != digest:
                 raise ValueError("Existing published output differs from manifest")
         print(json.dumps({"status": "REUSED_VERIFIED", "output": str(destination)}, ensure_ascii=False))
         return
-    meta_old = json.loads(OLD_META.read_text(encoding="utf-8"))
-    meta_new = json.loads(NEW_META.read_text(encoding="utf-8"))
-    if checksum(NEW) != meta_new["sha256"]:
-        raise ValueError("New source hash mismatch")
-    if not (meta_old["hcm_bbox"]["west"] <= 106.693 and meta_old["hcm_bbox"]["east"] >= 106.715
-            and meta_old["hcm_bbox"]["south"] <= 10.749 and meta_old["hcm_bbox"]["north"] >= 10.769):
-        raise ValueError("Old source does not cover buffered study area")
-    bbox_new = meta_new["bbox"]
-    if not (bbox_new[0] <= 106.693 and bbox_new[2] >= 106.715
-            and bbox_new[1] <= 10.749 and bbox_new[3] >= 10.769):
-        raise ValueError("New source does not cover buffered study area")
-    polygon = shape(json.loads(WARD.read_text(encoding="utf-8"))["geometry"])
-    if not polygon.is_valid or polygon.is_empty:
-        raise ValueError("Invalid pilot polygon")
-    buffer = polygon.buffer(BUFFER_DEGREES)
-    old_rows, old_geo, old_counts = extract(OLD, polygon, buffer)
-    new_rows, new_geo, new_counts = extract(NEW, polygon, buffer)
+    old_rows, old_geo, old_counts = extract(old_path, polygon, buffer)
+    new_rows, new_geo, new_counts = extract(new_path, polygon, buffer)
     if not old_rows or not new_rows:
         raise ValueError("Empty study area")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -184,22 +229,18 @@ def main(destination=DEST):
         raise ValueError("Previous partial stage exists; manual recovery required")
     stage.mkdir()
     try:
-        # Identical normalized Arrow contract across releases (legacy projection documented).
-        # Use the declared source Arrow types: inference from a small spatial
-        # subset can infer null-only nested fields as Arrow null type.
-        source_schema = pq.ParquetFile(OLD).schema_arrow
-        schema = pa.schema([source_schema.field(name) for name in FIELDS])
-        if set(schema.names) != set(FIELDS):
-            raise ValueError("Unexpected normalized fields")
+        # Both raw schemas passed structural validation before any output writes.
+        # Persist the same bytes used for extraction, never reread mutable geometry.
+        (stage / BOUNDARY_ARTIFACT).write_bytes(boundary_bytes)
         pq.write_table(pa.Table.from_pylist(old_rows, schema=schema), stage / "old.parquet", compression="zstd")
         pq.write_table(pa.Table.from_pylist(new_rows, schema=schema), stage / "new.parquet", compression="zstd")
-        release_meta = {"extraction_bbox": [106.693, 10.749, 106.715, 10.769],
-                        "spatial_filter": "point within Khánh Hội polygon buffered by 0.003 degrees",
+        release_meta = {"extraction_bbox": comparison_bbox,
+                        "spatial_filter": "point within Khánh Hội polygon buffered by 0.003 degrees" if frozen else "point within supplied polygon buffered by 0.003 degrees",
                         "taxonomy_policy": "same F&B classification applied after retaining all Places",
                         "source_schema": "local common 8-field projection; not raw Overture schema"}
-        old_info = dict(release_meta, release="2026-09-23.1", rows=len(old_rows),
+        old_info = dict(release_meta, release=meta_old["source_release"], rows=len(old_rows),
                         sha256=checksum(stage / "old.parquet"))
-        new_info = dict(release_meta, release="2026-10-21.0", rows=len(new_rows),
+        new_info = dict(release_meta, release=meta_new["source_release"], rows=len(new_rows),
                         sha256=checksum(stage / "new.parquet"))
         write_json(stage / "old.json", old_info)
         write_json(stage / "new.json", new_info)
@@ -232,15 +273,17 @@ def main(destination=DEST):
                    "inside_ward_new_fnb": sum(bool(r["new_inside_ward"] and r["new_fnb"]) for r in changes)}
         write_json(stage / "metrics.json", metrics)
         elapsed = time.perf_counter() - started
-        size_read = OLD.stat().st_size + NEW.stat().st_size
+        size_read = old_path.stat().st_size + new_path.stat().st_size
         write_json(stage / "performance.json", {"elapsed_seconds": elapsed,
                     "source_file_bytes": size_read, "method": "sequential local full-Parquet scan; cached input",
                     "changelog_bytes_read": None, "changelog_elapsed_seconds": None})
-        artifacts = ["old.parquet", "new.parquet", "old.json", "new.json", "poi_changes.parquet",
+        artifacts = [BOUNDARY_ARTIFACT, "old.parquet", "new.parquet", "old.json", "new.json", "poi_changes.parquet",
                      "metrics.json", "performance.json", "release_comparison_metrics.csv"]
-        manifest = {"old_release": "2026-09-23.1", "new_release": "2026-10-21.0",
-                    "old_source": str(OLD), "new_source": str(NEW),
-                    "input_sha256": {"old": checksum(OLD), "new": checksum(NEW), "polygon": checksum(WARD)},
+        manifest = {"old_release": meta_old["source_release"], "new_release": meta_new["source_release"],
+                    "old_source": str(old_path), "new_source": str(new_path),
+                    "input_sha256": input_hashes,
+                    "boundary_artifact": BOUNDARY_ARTIFACT,
+                    "comparison_schema_policy": schema_policy,
                     "output_sha256": {name: checksum(stage / name) for name in artifacts},
                     "projection_limitation": "Old September snapshot lacks source/version/contact/bbox fields",
                     "filter_scope": release_meta, "rows": metrics}
@@ -254,4 +297,13 @@ def main(destination=DEST):
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ("old-path", "old-metadata", "new-path", "new-metadata", "ward-path", "destination"):
+        parser.add_argument("--" + name, type=Path)
+    args = parser.parse_args()
+    explicit = any(getattr(args, name) is not None for name in
+                   ("old_path", "old_metadata", "new_path", "new_metadata", "ward_path"))
+    if explicit and args.destination is None:
+        parser.error("Explicit snapshots require --destination; historical paths are not reused")
+    main(args.destination or DEST, old_path=args.old_path, old_metadata=args.old_metadata,
+         new_path=args.new_path, new_metadata=args.new_metadata, ward_path=args.ward_path)

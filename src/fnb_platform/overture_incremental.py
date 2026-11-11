@@ -10,9 +10,40 @@ from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
+from .overture_snapshot import validate_snapshot, validate_pair_scope
 
 STATES = ("NEW", "UPDATED", "UNCHANGED", "MISSING_FROM_RELEASE")
+
+
+def selected_comparison_schema(old_schema, new_schema, fields):
+    """Require exact selected field structure before projecting either snapshot.
+
+    Nested additions/removals, type and nullability changes need an explicit
+    adapter. Only unselected top-level fields and Arrow metadata are ignored.
+    """
+    for label, schema in (("OLD", old_schema), ("NEW", new_schema)):
+        if len(schema.names) != len(set(schema.names)):
+            raise ValueError(f"{label} raw schema contains duplicate field names")
+        missing = set(fields) - set(schema.names)
+        if missing:
+            raise ValueError(f"{label} raw schema missing comparison fields: {sorted(missing)}")
+    for name in fields:
+        before, after = old_schema.field(name), new_schema.field(name)
+        if not before.equals(after, check_metadata=False):
+            raise ValueError(f"Selected raw schema mismatch: {name}: {before} -> {after}; "
+                             "explicit schema adapter required")
+    policy = {
+        "policy": "exact-selected-fields-v1",
+        "selected_fields": list(fields),
+        "ignored_top_level_fields": {
+            "old": sorted(set(old_schema.names) - set(fields)),
+            "new": sorted(set(new_schema.names) - set(fields)),
+        },
+        "limitations": "Unselected top-level fields and Arrow metadata are not compared; raw snapshots remain authoritative.",
+    }
+    return pa.schema([old_schema.field(name) for name in fields]), policy
 
 
 def _canonical(value):
@@ -52,18 +83,10 @@ def _release(metadata):
 
 def _load(path, metadata_path):
     path, metadata_path = Path(path), Path(metadata_path)
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata = validate_snapshot(path, metadata_path)
     parquet = pq.ParquetFile(path)
     if "id" not in parquet.schema_arrow.names:
         raise ValueError("Overture ID column missing")
-    expected_rows = metadata.get("raw_count", metadata.get("all_places_in_bbox", metadata.get("rows")))
-    if expected_rows is not None and parquet.metadata.num_rows != expected_rows:
-        raise ValueError("Metadata row count does not match Parquet")
-    expected_hash = metadata.get("sha256")
-    if expected_hash:
-        with path.open("rb") as source:
-            if hashlib.file_digest(source, "sha256").hexdigest() != expected_hash:
-                raise ValueError("Parquet SHA-256 mismatch")
     items = {}
     for batch in parquet.iter_batches(batch_size=4096):
         for row in batch.to_pylist():
@@ -80,6 +103,7 @@ def compare_releases(old_path, old_metadata, new_path, new_metadata, *, report_p
     """Compare complete, equivalent-scope extracts. Never infer business closure."""
     before, schema_before, old = _load(old_path, old_metadata)
     after, schema_after, new = _load(new_path, new_metadata)
+    validate_pair_scope(before, after)
     if _scope(before) != _scope(after):
         raise ValueError("Release bbox differs: comparison is not valid")
     if schema_before != schema_after:

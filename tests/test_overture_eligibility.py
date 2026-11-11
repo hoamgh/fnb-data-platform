@@ -59,7 +59,8 @@ def inputs(tmp_path):
     normalized = e.consumer.make_silver({r["id"]: r for r in rows}, e.RELEASE, "bronze-fixture-hash", scope)
     pq.write_table(pa.Table.from_pylist(normalized), silver / "current_state.parquet")
     missing = pa.Table.from_pylist([{"source_id": "missing", "source_release": e.RELEASE,
-                                    "source_presence": "MISSING_FROM_RELEASE", "verified_business_status": "UNKNOWN"}])
+                                    "source_presence": "MISSING_FROM_RELEASE", "verified_business_status": "UNKNOWN",
+                                    "explanation": "ABSENT_IN_NEW_BUFFER_UNRESOLVED"}])
     pq.write_table(missing, silver / "missing_or_out_of_scope.parquet")
     e.write_json(silver / "dq_metrics.json", {"fixture": True})
     e.write_json(silver / "manifest.json", {"release_id": e.RELEASE, "scope": scope,
@@ -201,3 +202,142 @@ def test_existing_operating_status_policy_is_preserved(status, expected):
     ({"primary": "shop", "hierarchy": ["shop"]}, "EXCLUDE_NON_FNB_HIERARCHY")])
 def test_existing_taxonomy_rules_are_reused(taxonomy, reason):
     assert e.m242.taxonomy_decision({"taxonomy": taxonomy}) == reason
+
+
+def publish_silver_fixture(inputs, monkeypatch, missing, complete):
+    """Run the real Silver publisher on a pinned, offline comparison fixture."""
+    c = e.consumer
+    source = inputs / e.SOURCE_DIR
+    raw = pq.read_table(source / "new.parquet")
+    rows = raw.to_pylist()
+    for row in rows:
+        row["confidence"] = None
+        if complete:
+            row["addresses"] = [{"freeform": "Fixture address"}]
+            if row["taxonomy"]["primary"] is None:
+                row["taxonomy"] = {"primary": "shop", "hierarchy": ["shop"], "alternates": []}
+    raw = pa.Table.from_pylist(rows, schema=raw.schema)
+    pq.write_table(raw, source / "new.parquet")
+    old_rows = rows + ([dict(rows[0], id="missing")] if missing else [])
+    pq.write_table(pa.Table.from_pylist(old_rows, schema=raw.schema), source / "old.parquet")
+    scope = {"spatial_filter": "fixture polygon.covers"}
+    counts = {"NEW": 0, "UPDATED": 0, "UNCHANGED": len(rows), "MISSING_FROM_RELEASE": int(missing)}
+    (source / c.BOUNDARY_ARTIFACT).write_bytes((inputs / e.BOUNDARY).read_bytes())
+    boundary_input = {"polygon": c.checksum(source / c.BOUNDARY_ARTIFACT)}
+    source_manifest = {
+        "old_release": "2026-09-23.1", "new_release": e.RELEASE, "filter_scope": scope,
+        "input_sha256": boundary_input, "boundary_artifact": c.BOUNDARY_ARTIFACT,
+        "output_sha256": {name: c.checksum(source / name) for name in ("old.parquet", "new.parquet", c.BOUNDARY_ARTIFACT)},
+        "rows": {"old": {"within_buffer": len(old_rows)}, "new": {"within_buffer": len(rows)}},
+    }
+    c.write_json(source / "manifest.json", source_manifest)
+    publication = inputs / "fixture-bronze"
+    release = publication / "releases" / e.RELEASE
+    release.mkdir(parents=True)
+    change_schema = pa.schema([
+        ("id", pa.string()), ("status", pa.string()), ("changed_fields", pa.list_(pa.string())),
+        ("substantive_change", pa.bool_()), ("explanation", pa.string()),
+    ])
+    artifacts = {}
+    for group in c.bronze.CHANGE_SETS:
+        changes = ([dict(id="missing", status="MISSING_FROM_RELEASE", changed_fields=[],
+                         substantive_change=False, explanation="ABSENT_IN_NEW_BUFFER_UNRESOLVED")]
+                   if missing and group == "missing_or_out_of_scope" else [])
+        path = release / (group + ".parquet")
+        pq.write_table(pa.Table.from_pylist(changes, schema=change_schema), path)
+        artifacts[path.name] = {"sha256": c.checksum(path), "rows": len(changes)}
+    c.write_json(release / "manifest.json", {
+        "old_release": source_manifest["old_release"], "new_release": e.RELEASE,
+        "source_manifest_sha256": c.checksum(source / "manifest.json"),
+        "source_input_sha256": boundary_input, "scope": scope, "counts": counts,
+        "schema_fields": change_schema.names, "artifacts": artifacts,
+    })
+    c.write_json(publication / "current.json", {
+        "release_id": e.RELEASE, "manifest_sha256": c.checksum(release / "manifest.json"),
+    })
+    monkeypatch.setattr(e, "SILVER_ROOT", Path("fixture-silver"))
+    directory, manifest = c.publish(source, publication, inputs / e.SILVER_ROOT)
+    # Pin the new fixture artifacts for the existing eligibility consumer.
+    paths = [inputs / e.HIST, directory / "current_state.parquet", source / "new.parquet", inputs / e.BOUNDARY]
+    e.write_json(inputs / e.REFERENCE, {"release": e.RELEASE,
+                 "inputs_sha256": {p.relative_to(inputs).as_posix(): e.m242.sha(p) for p in paths}})
+    return directory, manifest, source, publication
+
+
+@pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("complete", [False, True])
+def test_silver_explicit_schemas_roundtrip_to_eligibility(inputs, tmp_path, monkeypatch, missing, complete):
+    c = e.consumer
+    directory, manifest, source, publication = publish_silver_fixture(inputs, monkeypatch, missing, complete)
+    current = pq.read_table(directory / "current_state.parquet")
+    absent = pq.read_table(directory / "missing_or_out_of_scope.parquet")
+    assert current.schema == c.CURRENT_STATE_SCHEMA
+    assert absent.schema == c.MISSING_STATE_SCHEMA
+    assert all(field.nullable for field in current.schema)
+    assert all(field.nullable for field in absent.schema)
+    assert current.schema.field("source_id").type == pa.string()
+    assert current.schema.field("confidence").type == pa.float64()
+    assert current.schema.field("inside_ward").type == pa.bool_()
+    assert current.schema.field("dq_reasons").type == pa.list_(pa.string())
+    assert current.column("confidence").to_pylist() == [None] * 4
+    assert current.column("source_operating_status").to_pylist() == [None] * 4
+    assert current.column("source_id").to_pylist() == ["expanded", "original", "outside", "uncertain"]
+    if complete:
+        assert current.column("dq_reasons").to_pylist() == [[], [], [], []]
+    else:
+        assert current.column("address").to_pylist() == [None] * 4
+    assert absent.column("source_id").to_pylist() == (["missing"] if missing else [])
+    if missing:
+        assert absent.to_pylist()[0] == {
+            "source_id": "missing", "source_release": e.RELEASE,
+            "source_presence": "MISSING_FROM_RELEASE", "verified_business_status": "UNKNOWN",
+            "explanation": "ABSENT_IN_NEW_BUFFER_UNRESOLVED",
+        }
+    counts = dict(COUNTS, missing_from_release=int(missing))
+    target, _ = e.publish(inputs, tmp_path / "eligibility", expected_counts=counts)
+    assert pq.read_table(target / "missing_from_release.parquet").equals(absent)
+    assert pq.read_table(target / "candidates.parquet").column("source_id").to_pylist() == ["expanded", "original"]
+    hashes = {name: c.checksum(directory / name) for name in manifest["artifacts"]}
+    assert c.publish(source, publication, inputs / e.SILVER_ROOT)[0] == directory
+    assert hashes == {name: c.checksum(directory / name) for name in hashes}
+
+
+def test_historical_inferred_nulls_verify_without_rewriting(inputs):
+    c = e.consumer
+    directory = inputs / e.SILVER_ROOT / "releases" / e.RELEASE
+    path = directory / "current_state.parquet"
+    rows = pq.read_table(path).to_pylist()
+    for row in rows:
+        for name in c.LEGACY_NULL_FIELDS:
+            row[name] = None
+        row["dq_reasons"] = []
+    legacy = pa.Table.from_pylist(rows)
+    assert legacy.schema.field("address").type == pa.null()
+    assert legacy.schema.field("dq_reasons").type == pa.list_(pa.null())
+    pq.write_table(legacy, path)
+    seal(inputs)
+    before = {p: (e.m242.sha(p), p.stat().st_mtime_ns) for p in directory.iterdir() if p.is_file()}
+    c.verify_silver(directory)
+    assert before == {p: (e.m242.sha(p), p.stat().st_mtime_ns) for p in before}
+
+
+@pytest.mark.parametrize("case", ["wrong_id_type", "wrong_optional_type", "wrong_list_type", "missing_column", "legacy_columnless"])
+def test_silver_rejects_incompatible_schema_even_with_resealed_manifest(inputs, case):
+    c = e.consumer
+    directory = inputs / e.SILVER_ROOT / "releases" / e.RELEASE
+    path = directory / "current_state.parquet"
+    table = pq.read_table(path)
+    if case == "missing_column":
+        table = table.drop(["name_normalized"])
+    elif case == "legacy_columnless":
+        path = directory / "missing_or_out_of_scope.parquet"
+        table = pa.Table.from_pylist([])
+    else:
+        name, values = {"wrong_id_type": ("source_id", [1, 2, 3, 4]),
+                        "wrong_optional_type": ("address", [1, 2, 3, 4]),
+                        "wrong_list_type": ("dq_reasons", [[1]] * 4)}[case]
+        table = table.set_column(table.schema.get_field_index(name), name, pa.array(values))
+    pq.write_table(table, path)
+    seal(inputs)
+    with pytest.raises(c.SilverError, match="required columns|field type"):
+        c.verify_silver(directory)

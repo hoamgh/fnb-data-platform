@@ -28,7 +28,41 @@ DQ_SEVERITY = {"GEOMETRY_INVALID": "CRITICAL", "CONFIDENCE_INVALID": "WARNING",
                "ADDRESS_MISSING": "INFORMATIONAL"}
 sys.path.insert(0, str(ROOT / "experiments" / "overture_incremental"))
 import publish as bronze  # noqa: E402
-from run import FIELDS, canonical, checksum, field_changes, fnb  # noqa: E402
+from run import BOUNDARY_ARTIFACT, FIELDS, boundary_polygon, canonical, checksum, field_changes, fnb  # noqa: E402
+
+
+# Preserve the physical contract documented in CURRENT_DATA_SCHEMA.md, including
+# nullable fields and row/column order. Logical ID checks remain in verify_silver.
+CURRENT_STATE_SCHEMA = pa.schema([
+    ("source_id", pa.string()), ("source", pa.string()),
+    ("source_release", pa.string()), ("source_manifest_sha256", pa.string()),
+    ("name", pa.string()), ("name_normalized", pa.string()),
+    ("address", pa.string()), ("address_normalized", pa.string()),
+    ("basic_category", pa.string()), ("taxonomy_primary", pa.string()),
+    ("is_fnb", pa.bool_()), ("longitude", pa.float64()), ("latitude", pa.float64()),
+    ("inside_ward", pa.bool_()), ("on_ward_boundary", pa.bool_()),
+    ("recommendation_category", pa.string()), ("dq_severity", pa.string()),
+    ("gold_candidate", pa.bool_()), ("source_operating_status", pa.string()),
+    ("verified_business_status", pa.string()), ("confidence", pa.float64()),
+    ("dq_valid", pa.bool_()), ("dq_reasons", pa.list_(pa.string())),
+    ("scope_policy", pa.string()), ("source_presence", pa.string()),
+])
+MISSING_STATE_SCHEMA = pa.schema([
+    ("source_id", pa.string()), ("source_release", pa.string()),
+    ("source_presence", pa.string()), ("verified_business_status", pa.string()),
+    ("explanation", pa.string()),
+])
+OUTPUT_SCHEMAS = {
+    "current_state.parquet": CURRENT_STATE_SCHEMA,
+    "missing_or_out_of_scope.parquet": MISSING_STATE_SCHEMA,
+}
+# Older inferred tables can have null types where optional values were all None.
+# Accept these read-only; do not cast/rewrite immutable historical artifacts.
+LEGACY_NULL_FIELDS = frozenset({
+    "name", "name_normalized", "address", "address_normalized", "basic_category",
+    "taxonomy_primary", "longitude", "latitude", "inside_ward",
+    "recommendation_category", "source_operating_status", "confidence",
+})
 
 
 class SilverError(ValueError):
@@ -148,8 +182,8 @@ def load_ward():
     return polygon
 
 
-def make_silver(rows, release, manifest_hash, scope):
-    ward = load_ward()
+def make_silver(rows, release, manifest_hash, scope, *, ward=None):
+    ward = load_ward() if ward is None else ward
     result = []
     for key in sorted(rows):
         row = rows[key]
@@ -201,22 +235,54 @@ def make_silver(rows, release, manifest_hash, scope):
     return result
 
 
+def validate_output_schema(table, filename):
+    expected = OUTPUT_SCHEMAS[filename]
+    if table.schema.names != expected.names:
+        raise SilverError(f"Silver required columns incompatible: {filename}")
+    for actual, field in zip(table.schema, expected):
+        legacy_null = (filename == "current_state.parquet" and
+                       field.name in LEGACY_NULL_FIELDS and pa.types.is_null(actual.type))
+        legacy_empty_list = (field.name == "dq_reasons" and
+                             actual.type == pa.list_(pa.null()))
+        if actual.type != field.type and not legacy_null and not legacy_empty_list:
+            raise SilverError(f"Silver field type incompatible: {filename}.{field.name}: "
+                              f"{actual.type}, expected {field.type}")
+
+
+def pinned_boundary(directory, artifact, expected):
+    if artifact is not None and artifact != BOUNDARY_ARTIFACT:
+        raise SilverError("Unsupported boundary artifact")
+    if not isinstance(expected, str) or len(expected) != 64:
+        raise SilverError("Missing boundary checksum; cannot reconstruct pinned boundary")
+    path = Path(directory) / artifact if artifact is not None else WARD_PATH
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise SilverError("Pinned boundary unavailable; cannot reconstruct boundary") from exc
+    if hashlib.sha256(content).hexdigest() != expected:
+        raise SilverError("Pinned boundary checksum mismatch")
+    return content, boundary_polygon(content)
+
+
 def verify_silver(directory):
     directory = Path(directory)
     manifest = read_json(directory / "manifest.json")
-    if manifest.get("ward_polygon_sha256") and (checksum(WARD_PATH) != manifest["ward_polygon_sha256"] or
-            checksum(WARD_METADATA) != manifest.get("ward_metadata_sha256")):
+    pinned_boundary(directory, manifest.get("boundary_artifact"), manifest.get("ward_polygon_sha256"))
+    if "boundary_artifact" not in manifest and checksum(WARD_METADATA) != manifest.get("ward_metadata_sha256"):
         raise SilverError("Silver ward boundary provenance mismatch")
     if checksum(directory / "dq_metrics.json") != manifest["dq_metrics_sha256"]:
         raise SilverError("Silver quality metrics checksum mismatch")
     if read_json(directory / "dq_metrics.json") != manifest["metrics"]:
         raise SilverError("Silver quality metrics content mismatch")
+    if set(manifest["artifacts"]) != set(OUTPUT_SCHEMAS):
+        raise SilverError("Silver artifact contract incompatible")
     for filename, item in manifest["artifacts"].items():
         if checksum(directory / filename) != item["sha256"]:
             raise SilverError("Silver artifact checksum mismatch")
         table = pq.read_table(directory / filename)
         if table.num_rows != item["rows"] or table.schema.names != item["fields"]:
             raise SilverError("Silver artifact row/schema mismatch")
+        validate_output_schema(table, filename)
     current = pq.read_table(directory / "current_state.parquet", columns=["source_id"])
     ids = current.column("source_id").to_pylist()
     if len(set(ids)) != len(ids) or any(not x for x in ids):
@@ -243,6 +309,11 @@ def publish(source, publication, silver_root, *, fault=lambda stage: None):
         if a == b or a in b.parents or b in a.parents:
             raise SilverError("Silver root must be isolated from inputs")
     directory, upstream, source_manifest, pointer = pin_and_validate(publication, source)
+    boundary_hash = source_manifest["input_sha256"].get("polygon")
+    boundary_artifact = source_manifest.get("boundary_artifact")
+    if boundary_artifact is not None and source_manifest["output_sha256"].get(boundary_artifact) != boundary_hash:
+        raise SilverError("Comparison boundary lineage mismatch")
+    boundary_bytes, ward = pinned_boundary(source, boundary_artifact, boundary_hash)
     old, old_schema = rows_by_id(source / "old.parquet")
     new, new_schema = rows_by_id(source / "new.parquet")
     if old_schema != new_schema:
@@ -250,7 +321,7 @@ def publish(source, publication, silver_root, *, fault=lambda stage: None):
     current, changes = reconstruct(old, new, directory, upstream)
     if len(old) != source_manifest["rows"]["old"]["within_buffer"] or len(current) != source_manifest["rows"]["new"]["within_buffer"]:
         raise SilverError("Source manifest row count mismatch")
-    silver = make_silver(current, upstream["new_release"], pointer["manifest_sha256"], upstream["scope"])
+    silver = make_silver(current, upstream["new_release"], pointer["manifest_sha256"], upstream["scope"], ward=ward)
     missing = [{"source_id": r["id"], "source_release": upstream["new_release"],
                 "source_presence": "MISSING_FROM_RELEASE", "verified_business_status": "UNKNOWN",
                 "explanation": r["explanation"]} for r in changes["missing_or_out_of_scope"]]
@@ -269,14 +340,19 @@ def publish(source, publication, silver_root, *, fault=lambda stage: None):
         destination = silver_root / "releases" / release
         if destination.exists():
             existing = verify_silver(destination)
+            if existing["ward_polygon_sha256"] != boundary_hash:
+                raise SilverError("Silver boundary lineage collision")
             if existing["bronze_manifest_sha256"] != pointer["manifest_sha256"] or existing["source_manifest_sha256"] != upstream["source_manifest_sha256"]:
                 raise SilverError("Silver release identity collision")
         else:
             stage = silver_root / "staging" / (release + "-" + uuid.uuid4().hex)
             stage.mkdir(parents=True)
             fault("before_write")
-            pq.write_table(pa.Table.from_pylist(silver), stage / "current_state.parquet", compression="zstd")
-            pq.write_table(pa.Table.from_pylist(missing), stage / "missing_or_out_of_scope.parquet", compression="zstd")
+            (stage / BOUNDARY_ARTIFACT).write_bytes(boundary_bytes)
+            pq.write_table(pa.Table.from_pylist(silver, schema=CURRENT_STATE_SCHEMA),
+                           stage / "current_state.parquet", compression="zstd")
+            pq.write_table(pa.Table.from_pylist(missing, schema=MISSING_STATE_SCHEMA),
+                           stage / "missing_or_out_of_scope.parquet", compression="zstd")
             # DuckDB serves as the local model/query engine without a new service.
             con = duckdb.connect(":memory:")
             stats = con.execute("SELECT count(*) total, count(DISTINCT source_id) unique_ids, count(*) FILTER (WHERE dq_valid) dq_valid, count(*) FILTER (WHERE is_fnb) fnb, count(*) FILTER (WHERE NOT dq_valid) dq_flagged FROM read_parquet(?)", [str(stage / "current_state.parquet")]).fetchone()
@@ -300,8 +376,8 @@ def publish(source, publication, silver_root, *, fault=lambda stage: None):
             manifest = {"release_id": release, "old_release": upstream["old_release"],
                         "bronze_manifest_sha256": pointer["manifest_sha256"],
                         "source_manifest_sha256": upstream["source_manifest_sha256"],
-                        "scope": upstream["scope"], "ward_polygon_sha256": checksum(WARD_PATH),
-                        "ward_metadata_sha256": checksum(WARD_METADATA), "artifacts": artifacts,
+                        "scope": upstream["scope"], "ward_polygon_sha256": boundary_hash,
+                        "boundary_artifact": BOUNDARY_ARTIFACT, "artifacts": artifacts,
                         "dq_metrics_sha256": checksum(stage / "dq_metrics.json"), "metrics": metrics}
             write_json(stage / "manifest.json", manifest)
             verify_silver(stage)

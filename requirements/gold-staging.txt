@@ -1,0 +1,4 @@
+# Local dbt staging adapter; no cloud connection or dbt packages required.
+dbt-core==1.11.17
+dbt-duckdb==1.11.1
+duckdb==1.5.5

@@ -9,6 +9,7 @@ from threading import Lock
 from types import SimpleNamespace
 
 import pytest
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from scripts import google_live_workers as workers
@@ -105,6 +106,125 @@ def test_real_adapter_policy_does_not_bypass_stop_or_retry_budget(fake_crawlee, 
 
 def _review():
     return Review(source='google_maps', source_review_id='r1', store_id='s1', text='fixture', rating=4)
+
+
+@pytest.mark.parametrize('damage', ['payload', 'swapped', 'missing_column', 'wrong_type', 'data_page'])
+def test_replay_validates_payload_before_ack(tmp_path, damage):
+    from dataclasses import replace
+    writer = ParquetReviewWriter(tmp_path/'lake', 'run', '2026-11-04', batch_size=10)
+    repo = ReviewRepository(tmp_path/'state.sqlite3', run_id='run', parquet_writer=writer)
+    try:
+        repo.upsert(_review())
+        repo.upsert(replace(_review(), source_review_id='r2', text='other payload'))
+        pending = list(repo._db.execute(
+            'SELECT event_id,payload_json FROM pending_review_events ORDER BY created_at,event_id'))
+        path, _ = writer.write_batch([(row[0], json.loads(row[1])) for row in pending])
+        table = pq.ParquetFile(path).read()
+        if damage == 'data_page':
+            column = pq.ParquetFile(path).metadata.row_group(0).column(0)
+            raw = bytearray(path.read_bytes())
+            offset = column.data_page_offset
+            raw[offset:offset + 16] = b'\xff' * 16
+            path.write_bytes(raw)
+            assert pq.ParquetFile(path).metadata.num_rows == 2  # Footer remains readable.
+        else:
+            if damage == 'payload':
+                rows = table.to_pylist(); rows[0]['review_text'] = 'altered'
+                damaged = pa.Table.from_pylist(rows, schema=table.schema)
+            elif damage == 'swapped':
+                damaged = table.take(pa.array([1, 0]))  # Keep original footer membership order.
+            elif damage == 'missing_column':
+                damaged = table.drop(['review_text'])
+            else:
+                index = table.schema.get_field_index('rating')
+                damaged = table.set_column(index, 'rating', table['rating'].cast(pa.string()))
+            pq.write_table(damaged, path)
+        before = path.read_bytes()
+        with pytest.raises((RuntimeError, pa.ArrowException, OSError)):
+            repo.flush()
+        assert repo.pending_count() == 2
+        assert [tuple(row) for row in repo._db.execute(
+            'SELECT event_id,payload_json FROM pending_review_events ORDER BY created_at,event_id')
+        ] == [tuple(row) for row in pending]
+        assert path.read_bytes() == before
+    finally:
+        repo._db.close()  # Do not retry the intentionally corrupt fixture during cleanup.
+
+
+def test_replay_uses_publication_serialization_contract(tmp_path):
+    from dataclasses import replace
+    writer = ParquetReviewWriter(tmp_path/'lake', 'run', '2026-11-04', batch_size=10)
+    repo = ReviewRepository(tmp_path/'state.sqlite3', run_id='run', parquet_writer=writer)
+    instant = datetime(2026, 11, 4, tzinfo=timezone.utc)
+    try:
+        repo.upsert(replace(_review(), published_at=instant, last_modified_at=instant,
+                            timestamp_status='VERIFIED', image_urls=['https://example.invalid/image']))
+        events = [(row[0], json.loads(row[1])) for row in repo._db.execute(
+            'SELECT event_id,payload_json FROM pending_review_events ORDER BY created_at,event_id')]
+        path, _ = writer.write_batch(events)
+        before = path.read_bytes()
+        repo.flush()
+        assert repo.pending_count() == 0 and path.read_bytes() == before
+        assert len(list((tmp_path/'lake').rglob('*.parquet'))) == 1
+    finally:
+        repo.close()
+
+
+@pytest.mark.parametrize('damage', ['one_file', 'all_files', 'different_identity', 'content'])
+def test_reconciliation_rejects_missing_or_altered_reviews(tmp_path, damage):
+    from dataclasses import replace
+    database, lake = tmp_path/'state.sqlite3', tmp_path/'lake'
+    repo = ReviewRepository(database, run_id='run', parquet_writer=ParquetReviewWriter(
+        lake, 'run', '2026-11-04', batch_size=1))
+    repo.upsert(_review())
+    repo.upsert(replace(_review(), source_review_id='r2'))
+    repo.close()
+    files = sorted(lake.rglob('*.parquet'))
+    if damage in {'one_file', 'all_files'}:
+        for path in files[:1] if damage == 'one_file' else files:
+            path.unlink()  # Only pytest temporary fixtures.
+    else:
+        table = pq.ParquetFile(files[0]).read(); rows = table.to_pylist()
+        rows[0]['source_review_id' if damage == 'different_identity' else 'review_text'] = 'different'
+        pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), files[0])
+    with pytest.raises(RuntimeError, match='coverage|identities|content hash'):
+        workers.reconcile(database, lake)
+
+
+@pytest.mark.parametrize('rating', [4, 4.0, 4.5, None])
+def test_reconciliation_allows_updates_and_distinguishes_unpublished_state(tmp_path, rating):
+    from dataclasses import replace
+    database, lake = tmp_path/'state.sqlite3', tmp_path/'lake'
+    repo = ReviewRepository(database, run_id='run', parquet_writer=ParquetReviewWriter(
+        lake, 'run', '2026-11-04', batch_size=10))
+    review = replace(_review(), rating=rating)
+    try:
+        empty = workers.reconcile(database, lake)
+        assert empty['sqlite_records'] == empty['parquet_rows'] == 0
+        repo.upsert(review)
+        pending = workers.reconcile(database, lake)
+        assert pending['pending'] == pending['unpublished_review_identities'] == 1
+        repo.upsert_review_state(replace(review, text='updated once'))
+        repo.upsert_review_state(replace(review, text='updated twice'))
+        repo.flush()
+        complete = workers.reconcile(database, lake)
+        assert complete['sqlite_records'] == complete['persisted_review_identities'] == 1
+        assert complete['parquet_rows'] == 3 and complete['pending'] == 0
+        assert complete['unpublished_review_identities'] == 0
+        assert 'full_event_history_not_proven' in complete['integrity_scope']
+        assert not repo.upsert(replace(review, text='updated twice'))
+        assert workers.reconcile(database, lake)['parquet_rows'] == 3
+    finally:
+        repo.close()
+
+
+def test_reconciliation_rejects_state_only_capture_without_fabricating_recovery(tmp_path):
+    database, lake = tmp_path/'state.sqlite3', tmp_path/'lake'
+    repo = ReviewRepository(database)
+    repo.upsert(_review())
+    repo.close()
+    with pytest.raises(RuntimeError, match='without pending evidence'):
+        workers.reconcile(database, lake)
 
 
 @pytest.mark.parametrize('failure', ['before_publish', 'after_publish'])
@@ -285,3 +405,220 @@ def test_cdp_never_enriches_dom_review_with_another_review_id():
     assert result.source_review_id == 'r1'
     assert result.timestamp_status == 'MISSING'
     assert result.published_at is None and result.last_modified_at is None
+
+
+@pytest.fixture
+def metadata_repo(tmp_path):
+    writer = ParquetReviewWriter(tmp_path/'lake', 'metadata', '2026-11-10')
+    repo = ReviewRepository(tmp_path/'state.sqlite3', run_id='metadata', parquet_writer=writer,
+                            clock=lambda: '2026-11-10T00:00:00+00:00')
+    try:
+        yield repo
+    finally:
+        repo.close()
+
+
+def _verified_review(day=2, **changes):
+    from dataclasses import replace
+    return replace(_review(), rating=4.0, timestamp_status='VERIFIED',
+                   timestamp_source='google_maps_network',
+                   published_at=datetime(2026, 11, 1, tzinfo=timezone.utc),
+                   last_modified_at=datetime(2026, 11, day, tzinfo=timezone.utc), **changes)
+
+
+def _pending_payloads(repo):
+    return [json.loads(row[0]) for row in repo._db.execute(
+        'SELECT payload_json FROM pending_review_events ORDER BY rowid')]
+
+
+def test_metadata_timestamp_upgrade_increase_and_no_downgrade(metadata_repo):
+    from dataclasses import replace
+    from crawl_experiment.storage.review_repository import ReviewChange
+    repo = metadata_repo
+    missing = replace(_review(), rating=4.0)
+    assert repo.upsert_review_state(missing) is ReviewChange.INSERT
+    assert repo.upsert_review_state(_verified_review()) is ReviewChange.UPDATE
+    assert repo.upsert_review_state(_verified_review()) is ReviewChange.UNCHANGED
+    assert repo.upsert_review_state(_verified_review(3)) is ReviewChange.UPDATE
+    for status in ('MISSING', 'PARSE_FAILED', 'AMBIGUOUS'):
+        assert repo.upsert_review_state(replace(missing, timestamp_status=status)) is ReviewChange.UNCHANGED
+    assert repo.pending_count() == 3
+    state = repo.get_review_state(*missing.identity)
+    assert state['timestamp_status'] == 'VERIFIED'
+    assert state['last_modified_at'] == _verified_review(3).last_modified_at.isoformat()
+    payloads = _pending_payloads(repo)
+    assert [row['timestamp_status'] for row in payloads] == ['MISSING', 'VERIFIED', 'VERIFIED']
+    assert len({row['content_hash'] for row in payloads}) == 1
+    assert [row['change_type'] for row in payloads] == ['INSERT', 'UPDATE', 'UPDATE']
+
+
+@pytest.mark.parametrize('field,value', [
+    ('review_url', 'https://example.invalid/review'), ('reviewer_id', 'reviewer-1'),
+    ('reviewer_profile_url', 'https://example.invalid/profile'),
+    ('reviewer_avatar_url', 'https://example.invalid/avatar'),
+    ('reviewer_review_count', 12), ('reviewer_photo_count', 4), ('reviewer_is_local_guide', True),
+])
+def test_meaningful_metadata_update_without_hash_change_or_spam(metadata_repo, field, value):
+    from dataclasses import replace
+    from crawl_experiment.storage.review_repository import ReviewChange
+    repo = metadata_repo
+    original = _verified_review()
+    changed = replace(original, **{field: value})
+    repo.upsert_review_state(original)
+    assert repo.upsert_review_state(changed) is ReviewChange.UPDATE
+    for _ in range(3):
+        assert repo.upsert_review_state(changed) is ReviewChange.UNCHANGED
+    noisy = replace(changed, displayed_date='a week ago', reviewer_metadata_raw='changed UI text')
+    assert repo.upsert_review_state(noisy) is ReviewChange.UNCHANGED
+    payloads = _pending_payloads(repo)
+    assert len(payloads) == 2 and payloads[-1][field] == value
+    assert payloads[0]['content_hash'] == payloads[1]['content_hash']
+
+
+def test_metadata_updates_at_identical_clock_do_not_collide(metadata_repo):
+    from dataclasses import replace
+    repo = metadata_repo
+    for url in (None, 'https://example.invalid/one', 'https://example.invalid/two'):
+        repo.upsert_review_state(replace(_verified_review(), review_url=url))
+    assert repo.pending_count() == 3
+    assert len({row[0] for row in repo._db.execute('SELECT event_id FROM pending_review_events')}) == 3
+
+
+@pytest.mark.parametrize('mode', ['stale', 'missing', 'same_time', 'published_conflict'])
+def test_conflicting_observation_preserves_current_and_own_parquet_timestamps(metadata_repo, tmp_path, mode):
+    from dataclasses import replace
+    from crawl_experiment.storage.review_repository import ReviewChange, review_content_hash
+    from fnb_platform import google_reviews_silver as silver
+    repo = metadata_repo
+    current = _verified_review(3, text='new content')
+    if mode == 'missing':
+        incoming = replace(_review(), rating=4.0, text='uncertain content')
+    elif mode == 'published_conflict':
+        incoming = replace(_verified_review(4, text='conflicting publication'),
+                           published_at=datetime(2026, 11, 2, tzinfo=timezone.utc))
+    else:
+        incoming = _verified_review(2 if mode == 'stale' else 3, text='old or conflicting content')
+    repo.upsert_review_state(current, observed_at='2026-11-09T00:00:00+00:00')
+    assert repo.upsert_review_state(incoming) is ReviewChange.UPDATE
+    assert repo.upsert_review_state(incoming) is ReviewChange.UNCHANGED
+    state = repo.get_review_state(*current.identity)
+    assert state['content_hash'] == review_content_hash(current)
+    assert state['last_modified_at'] == current.last_modified_at.isoformat()
+    assert 'CURRENT_STATE_NOT_ADVANCED' in json.loads(state['change_diagnostics'])
+    payload = _pending_payloads(repo)[-1]
+    assert payload['review_text'] == incoming.text
+    assert payload['last_modified_at'] == (incoming.last_modified_at.isoformat() if mode != 'missing' else None)
+    assert payload['timestamp_status'] == incoming.timestamp_status
+    repo.flush()
+    bridge = dict(binding_status='BOUND', crawler_store_id='s1', google_id_kind='data_id',
+                  google_identity_value='0x1:0x1', bridge_id='fixture', source_run='fixture',
+                  job_ref='fixture-job', capture_ref='fixture-capture')
+    events = []
+    for path in (tmp_path/'lake').rglob('*.parquet'):
+        reader = pq.ParquetFile(path)
+        ids = json.loads(reader.metadata.metadata[b'review_event_ids'])
+        for index, row in enumerate(reader.read().to_pylist()):
+            normalized = silver.normalize_event(row, bridge, path, index, ids[index], 'fixture-sha')
+            events.append((normalized, silver._digest(row)))
+    observations, selected = silver.resolve_events(events)
+    assert len(observations) == 2 and len(selected) == 1
+    assert selected[0]['review_text'] == current.text
+    assert selected[0]['last_modified_at'] == current.last_modified_at
+    rejected = next(row for row in observations if row['review_text'] == incoming.text)
+    assert not rejected['current_eligible'] and 'CURRENT_STATE_NOT_ADVANCED' in rejected['dq_flags']
+
+
+def test_reopen_replays_metadata_events_and_preserves_dedup_state(tmp_path):
+    from crawl_experiment.storage.review_repository import ReviewChange
+    path, lake = tmp_path/'state.sqlite3', tmp_path/'lake'
+    repo = ReviewRepository(path, run_id='old', parquet_writer=ParquetReviewWriter(lake, 'old', '2026-11-10'))
+    repo.upsert_review_state(_review())
+    # Same numeric representation as the original content hash.
+    from dataclasses import replace
+    verified = replace(_verified_review(), rating=4)
+    repo.upsert_review_state(verified)
+    before = [tuple(row) for row in repo._db.execute('SELECT event_id,payload_json FROM pending_review_events')]
+    repo._db.close()  # Simulate exit before flush, not a hard-crash durability claim.
+    reopened = ReviewRepository(path, run_id='new', parquet_writer=ParquetReviewWriter(lake, 'new', '2026-11-10'))
+    try:
+        assert reopened.pending_count() == 0
+        assert reopened.upsert_review_state(verified) is ReviewChange.UNCHANGED
+        events = []
+        for file in lake.rglob('*.parquet'):
+            events.extend(json.loads(pq.ParquetFile(file).metadata.metadata[b'review_event_ids']))
+        assert set(events) == {row[0] for row in before} and len(events) == 2
+        assert reopened.get_review_state(*verified.identity)['timestamp_status'] == 'VERIFIED'
+    finally:
+        reopened.close()
+
+
+def test_nullable_metadata_migration_preserves_existing_pending_events(tmp_path):
+    from crawl_experiment.storage.review_repository import ReviewChange
+    path = tmp_path/'legacy.sqlite3'
+    repo = ReviewRepository(path, run_id='old', parquet_writer=ParquetReviewWriter(tmp_path/'lake', 'old', '2026-11-10'))
+    repo.upsert_review_state(_verified_review())
+    pending = [tuple(row) for row in repo._db.execute('SELECT * FROM pending_review_events')]
+    repo._db.execute('ALTER TABLE review_state DROP COLUMN metadata_json')
+    repo._db.execute('ALTER TABLE review_state DROP COLUMN last_event_fingerprint')
+    repo._db.commit(); repo._db.close()
+    migrated = ReviewRepository(path, run_id='next')  # No writer: inspect migration without flushing.
+    try:
+        assert [tuple(row) for row in migrated._db.execute('SELECT * FROM pending_review_events')] == pending
+        state = migrated.get_review_state('google_maps', 'r1')
+        assert state['metadata_json'] is None and state['last_event_fingerprint'] is None
+        # Legacy metadata is unknown: establish one baseline, then no repeat spam.
+        assert migrated.upsert_review_state(_verified_review()) is ReviewChange.UPDATE
+        assert migrated.upsert_review_state(_verified_review()) is ReviewChange.UNCHANGED
+    finally:
+        migrated.close()
+
+
+def test_newer_verified_content_advances_state(metadata_repo):
+    from crawl_experiment.storage.review_repository import ReviewChange, review_content_hash
+    repo = metadata_repo
+    original, newer = _verified_review(2), _verified_review(3, text='verified new content')
+    repo.upsert_review_state(original)
+    assert repo.upsert_review_state(newer) is ReviewChange.UPDATE
+    state = repo.get_review_state(*newer.identity)
+    assert state['content_hash'] == review_content_hash(newer)
+    assert state['last_modified_at'] == newer.last_modified_at.isoformat()
+    assert 'CURRENT_STATE_NOT_ADVANCED' not in _pending_payloads(repo)[-1]['change_diagnostics']
+    assert repo.upsert_review_state(newer) is ReviewChange.UNCHANGED
+
+
+def test_unverified_metadata_gain_is_evidence_not_verified_current_downgrade(metadata_repo):
+    from dataclasses import replace
+    from crawl_experiment.storage.review_repository import ReviewChange
+    repo = metadata_repo
+    original = _verified_review()
+    incoming = replace(original, published_at=None, last_modified_at=None,
+                       timestamp_status='MISSING', timestamp_source=None,
+                       review_url='https://example.invalid/new-evidence')
+    repo.upsert_review_state(original)
+    assert repo.upsert_review_state(incoming) is ReviewChange.UPDATE
+    assert repo.upsert_review_state(incoming) is ReviewChange.UNCHANGED
+    row = _pending_payloads(repo)[-1]
+    assert row['review_url'] == incoming.review_url and row['last_modified_at'] is None
+    assert row['timestamp_status'] == 'MISSING'
+    assert 'CURRENT_STATE_NOT_ADVANCED' in row['change_diagnostics']
+    state = repo.get_review_state(*original.identity)
+    assert state['timestamp_status'] == 'VERIFIED'
+    assert state['last_modified_at'] == original.last_modified_at.isoformat()
+
+
+def test_reactivation_reuses_locked_current_row_without_duplicate_select(metadata_repo):
+    repo = metadata_repo
+    review = _verified_review()
+    repo.upsert_review_state(review)
+    with repo._db:
+        repo._db.execute('UPDATE review_state SET is_active=0,miss_count=3')
+    statements = []
+    repo._db.set_trace_callback(statements.append)
+    repo.upsert_review_state(review)
+    repo._db.set_trace_callback(None)
+    reads = [sql for sql in statements if sql.upper().startswith('SELECT') and 'review_state' in sql]
+    assert len(reads) == 1
+    assert repo.consume_observed_previous(review.source_review_id) == (3, False)
+    assert repo.consume_reactivation(review.source_review_id)
+    assert repo.reactivation_previous_miss_count(review.source_review_id) == 3
+    assert repo.get_review_state(*review.identity)['is_active'] == 1

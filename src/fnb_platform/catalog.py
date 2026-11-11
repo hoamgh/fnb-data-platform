@@ -1,10 +1,23 @@
-"""One Overture ward filtering/normalization pipeline and reusable catalog artifacts."""
+"""Overture ward catalog with atomic, immutable generation publication.
+
+The logical Parquet path resolves through <path>.catalog/current.json to
+generations/<manifest-sha256>/catalog.parquet and catalog.manifest.json.
+Only pointer replacement activates a generation. Historical Parquet/manifest
+pairs remain read-only fallback until the first activation; never dual-write.
+Use load_catalog, not a direct Parquet read of the logical path.
+
+Identical rows and metadata (including observation timestamps) reuse the same
+generation. Failed/unused private staging and orphan generations are retained;
+a hard process exit can leave a lock requiring manual owner review.
+"""
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+import os
 import uuid
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -156,38 +169,123 @@ def manifest_path(path):
     return Path(path).with_suffix(".manifest.json")
 
 
-def persist_catalog(catalog, path, manifest):
-    """Finalize Parquet first, manifest last; checksum rejects mixed generations."""
+def publication_root(path):
+    """The old Parquet path remains a logical catalog handle, never a dual write."""
+    return Path(path).with_name(Path(path).name + ".catalog")
+
+
+def catalog_exists(path):
+    return ((publication_root(path) / "current.json").exists() or Path(path).exists()
+            or manifest_path(path).exists())
+
+
+def _json_bytes(value):
+    return (json.dumps(value, sort_keys=True, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+@contextmanager
+def _publication_lock(path):
+    root = publication_root(path)
+    root.mkdir(parents=True, exist_ok=True)
+    lock = root / ".publication.lock"
+    try:
+        stream = lock.open("x", encoding="utf-8")
+    except FileExistsError:
+        raise ValueError("Catalog publication locked; manual stale-lock review required") from None
+    try:
+        with stream:
+            stream.write(str(os.getpid()))
+        yield root
+    finally:
+        lock.unlink()
+
+
+def _pin_catalog(path):
+    """Resolve current exactly once; historical pairs are read-only fallback."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    root = publication_root(path)
+    pointer = root / "current.json"
+    if pointer.exists():
+        current = json.loads(pointer.read_bytes())
+        generation = current.get("generation")
+        if (current.get("publication_version") != 1 or not isinstance(generation, str)
+                or len(generation) != 64 or any(c not in "0123456789abcdef" for c in generation)
+                or current.get("manifest_sha256") != generation):
+            raise ValueError("Invalid catalog generation pointer")
+        path = root / "generations" / generation / "catalog.parquet"
+        metadata = manifest_path(path).read_bytes()
+        if hashlib.sha256(metadata).hexdigest() != generation:
+            raise ValueError("Catalog manifest checksum mismatch")
+    else:
+        if not path.exists() or not manifest_path(path).exists():
+            raise FileNotFoundError(f"Canonical catalog missing: {path}; run python -m fnb_platform.prepare_catalog first")
+        metadata = manifest_path(path).read_bytes()
+    return path, json.loads(metadata)
+
+
+def persist_catalog(catalog, path, manifest, *, fault=lambda phase: None):
+    """Publish one immutable generation; current-pointer replacement commits it."""
+    with _publication_lock(path) as root:
+        return _publish_catalog(catalog, path, manifest, root, fault=fault)
+
+
+def _publish_catalog(catalog, path, manifest, root, *, fault=lambda phase: None):
+    # Never silently repair an invalid active generation or historical pair.
+    if catalog_exists(path):
+        load_catalog(path)
     metadata = dict(manifest, schema_version=SCHEMA_VERSION, counts=catalog.counts,
                     dedup_policy="last accepted occurrence wins; first identity occurrence orders rows")
-    temporary_manifest = temporary.with_suffix(".json.tmp")
-    try:
-        pq.write_table(pa.Table.from_pylist([p.to_dict() for p in catalog.places], schema=_schema()),
-                       temporary, compression="zstd")
-        metadata["artifact_sha256"] = hashlib.sha256(temporary.read_bytes()).hexdigest()
-        temporary_manifest.write_text(json.dumps(metadata, sort_keys=True, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(path)
-        temporary_manifest.replace(manifest_path(path))
-    finally:
-        temporary.unlink(missing_ok=True)
-        temporary_manifest.unlink(missing_ok=True)
+    stage = root / "staging" / uuid.uuid4().hex
+    stage.mkdir(parents=True)
+    artifact = stage / "catalog.parquet"
+    pq.write_table(pa.Table.from_pylist([p.to_dict() for p in catalog.places], schema=_schema()),
+                   artifact, compression="zstd")
+    metadata["artifact_sha256"] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    manifest_bytes = _json_bytes(metadata)
+    manifest_path(artifact).write_bytes(manifest_bytes)
+    _read_catalog(artifact, metadata)
+    generation = hashlib.sha256(manifest_bytes).hexdigest()
+    destination = root / "generations" / generation
+    if destination.exists():
+        saved = manifest_path(destination / "catalog.parquet").read_bytes()
+        if saved != manifest_bytes:
+            raise ValueError("Existing catalog generation manifest checksum mismatch")
+        _read_catalog(destination / "catalog.parquet", json.loads(saved))
+    else:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        fault("before_release_rename")
+        os.replace(stage, destination)
+    fault("after_release_rename")
+    # Verify at the final path too (e.g. Windows path/access failures after rename).
+    published_manifest = manifest_path(destination / "catalog.parquet").read_bytes()
+    if published_manifest != manifest_bytes:
+        raise ValueError("Published catalog manifest checksum mismatch")
+    _read_catalog(destination / "catalog.parquet", json.loads(published_manifest))
+    pointer_bytes = _json_bytes(dict(publication_version=1, generation=generation,
+                                   manifest_sha256=generation))
+    pointer = root / "current.json"
+    if not pointer.exists() or pointer.read_bytes() != pointer_bytes:
+        temporary = root / (".current-" + uuid.uuid4().hex + ".tmp")
+        temporary.write_bytes(pointer_bytes)
+        fault("before_pointer_replace")
+        os.replace(temporary, pointer)
+    fault("after_pointer_replace")
     return metadata
 
 
 def load_catalog(path=DEFAULT_CATALOG):
     """Read typed persisted objects only: no taxonomy, polygon, raw or network."""
-    path = Path(path)
-    if not path.exists() or not manifest_path(path).exists():
-        raise FileNotFoundError(f"Canonical catalog missing: {path}; run python -m fnb_platform.prepare_catalog first")
-    manifest = json.loads(manifest_path(path).read_text(encoding="utf-8"))
+    artifact, manifest = _pin_catalog(path)
+    return _read_catalog(artifact, manifest)
+
+
+def _read_catalog(path, manifest):
     if manifest.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("Unsupported canonical catalog schema version")
-    if hashlib.sha256(path.read_bytes()).hexdigest() != manifest.get("artifact_sha256"):
+    content = path.read_bytes()
+    if hashlib.sha256(content).hexdigest() != manifest.get("artifact_sha256"):
         raise ValueError("Canonical catalog/manifest checksum mismatch")
-    table = pq.ParquetFile(path).read()
+    table = pq.ParquetFile(pa.BufferReader(content)).read()
     if table.schema != _schema():
         raise ValueError("Canonical catalog fields/types are incompatible")
     places = [CanonicalPlace.from_dict(row) for row in table.to_pylist()]
@@ -209,8 +307,6 @@ def prepare_catalog(source, ward, output, lineage, *, observed_at, reader=None):
         table = pq.ParquetFile(source).read()
     else:
         table = reader(bbox=bbox, release=release)
-    previous = {p.place_key: p for p in load_catalog(output).places} if Path(output).exists() else None
-    catalog = _build_catalog(table, admin_area, polygon, observed_at=observed_at, existing=previous)
     properties = admin_area["properties"]
     metadata = dict(
         overture_release=release, overturemaps_client_version=lineage.get("client_version"),
@@ -225,4 +321,8 @@ def prepare_catalog(source, ward, output, lineage, *, observed_at, reader=None):
         boundary_sha256=hashlib.sha256(json.dumps(admin_area["geometry"], sort_keys=True).encode()).hexdigest(),
         bbox=list(bbox),
     )
-    return catalog, persist_catalog(catalog, output, metadata)
+    # Serialize read/merge/publish so a concurrent enrichment cannot be lost.
+    with _publication_lock(output) as root:
+        previous = {p.place_key: p for p in load_catalog(output).places} if catalog_exists(output) else None
+        catalog = _build_catalog(table, admin_area, polygon, observed_at=observed_at, existing=previous)
+        return catalog, _publish_catalog(catalog, output, metadata, root)

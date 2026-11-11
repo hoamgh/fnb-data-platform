@@ -66,22 +66,10 @@ class ParquetReviewWriter:
         event_ids = [event_id for event_id, _ in items]
         fingerprint = self._fingerprint(event_ids)
         target = self.output_path / f"part-{fingerprint}.parquet"
-        if target.exists():
-            import pyarrow.parquet as pq
-
-            existing = pq.ParquetFile(target)
-            if existing.metadata.num_rows != len(event_ids):
-                raise RuntimeError(f'Parquet batch row count mismatch: {target}')
-            metadata = existing.metadata.metadata or {}
-            persisted_ids = json.loads(metadata.get(b"review_event_ids", b"[]"))
-            if persisted_ids != event_ids:
-                raise RuntimeError(f"Parquet batch filename collision: {target}")
-            return target, event_ids
-
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        self.output_path.mkdir(parents=True, exist_ok=True)
+        # Use exactly the publication projection for replay validation as well.
         rows = [{column: payload.get(column) for column in self.COLUMNS} for _, payload in items]
         for row in rows:
             for column in ("published_at", "last_modified_at"):
@@ -90,6 +78,22 @@ class ParquetReviewWriter:
             row['timestamp_status'] = row['timestamp_status'] or 'MISSING'
             row['change_diagnostics'] = row['change_diagnostics'] or []
         table = pa.Table.from_pylist(rows, schema=self.schema())
+        if target.exists():
+            existing = pq.ParquetFile(target)
+            if existing.metadata.num_rows != len(event_ids):
+                raise RuntimeError(f'Parquet batch row count mismatch: {target}')
+            metadata = existing.metadata.metadata or {}
+            persisted_ids = json.loads(metadata.get(b"review_event_ids", b"[]"))
+            if persisted_ids != event_ids:
+                raise RuntimeError(f"Parquet batch filename collision: {target}")
+            if not existing.schema_arrow.equals(table.schema, check_metadata=False):
+                raise RuntimeError(f"Parquet batch schema mismatch: {target}")
+            # Read data pages and compare ordered rows before allowing ACK.
+            if not existing.read().equals(table, check_metadata=False):
+                raise RuntimeError(f"Parquet batch payload mismatch: {target}")
+            return target, event_ids
+
+        self.output_path.mkdir(parents=True, exist_ok=True)
         table = table.replace_schema_metadata(
             {b"review_event_ids": json.dumps(event_ids, separators=(",", ":")).encode()}
         )

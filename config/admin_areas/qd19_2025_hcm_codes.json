@@ -1,0 +1,852 @@
+{
+  "version": "qd19-2025-hcm-extract-v1.1",
+  "source_pdf_sha256": "8c102cf1b24feb831bfcaa26ec6bcc77fde5e48a235b3e633809b86411ee4e13",
+  "legal_document": "19/2025/QĐ-TTg",
+  "effective_from": "2025-07-01",
+  "source_url": "https://congbaocdn.chinhphu.vn/CongBaoCP/VanBan/2025/6/45430/57441-1-2025921-92219-2025-qd-ttg.pdf",
+  "extraction_method": "Primary government PDF text extraction via web tool; HCMC section, printed pages 45–52; Khánh Hội printed page 49.",
+  "city_code": "79",
+  "city_name": "Thành phố Hồ Chí Minh",
+  "rows": [
+    {
+      "ward_code": "25747",
+      "ward_name": "Phường Thủ Dầu Một",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25750",
+      "ward_name": "Phường Phú Lợi",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25760",
+      "ward_name": "Phường Bình Dương",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25768",
+      "ward_name": "Phường Phú An",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25771",
+      "ward_name": "Phường Chánh Hiệp",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25813",
+      "ward_name": "Phường Bến Cát",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25837",
+      "ward_name": "Phường Chánh Phú Hòa",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25840",
+      "ward_name": "Phường Long Nguyên",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25843",
+      "ward_name": "Phường Tây Nam",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25846",
+      "ward_name": "Phường Thới Hòa",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25849",
+      "ward_name": "Phường Hòa Lợi",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25888",
+      "ward_name": "Phường Tân Uyên",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25891",
+      "ward_name": "Phường Tân Khánh",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25912",
+      "ward_name": "Phường Vĩnh Tân",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25915",
+      "ward_name": "Phường Bình Cơ",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25920",
+      "ward_name": "Phường Tân Hiệp",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25942",
+      "ward_name": "Phường Dĩ An",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25945",
+      "ward_name": "Phường Tân Đông Hiệp",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25951",
+      "ward_name": "Phường Đông Hòa",
+      "pdf_page_index": 42
+    },
+    {
+      "ward_code": "25966",
+      "ward_name": "Phường Lái Thiêu",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "25969",
+      "ward_name": "Phường Thuận Giao",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "25975",
+      "ward_name": "Phường An Phú",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "25978",
+      "ward_name": "Phường Thuận An",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "25987",
+      "ward_name": "Phường Bình Hòa",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26506",
+      "ward_name": "Phường Vũng Tàu",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26526",
+      "ward_name": "Phường Tam Thắng",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26536",
+      "ward_name": "Phường Rạch Dừa",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26542",
+      "ward_name": "Phường Phước Thắng",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26560",
+      "ward_name": "Phường Bà Rịa",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26566",
+      "ward_name": "Phường Long Hương",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26572",
+      "ward_name": "Phường Tam Long",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26704",
+      "ward_name": "Phường Phú Mỹ",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26710",
+      "ward_name": "Phường Tân Hải",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26713",
+      "ward_name": "Phường Tân Phước",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26725",
+      "ward_name": "Phường Tân Thành",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26737",
+      "ward_name": "Phường Tân Định",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26740",
+      "ward_name": "Phường Sài Gòn",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26743",
+      "ward_name": "Phường Bến Thành",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26758",
+      "ward_name": "Phường Cầu Ông Lãnh",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26767",
+      "ward_name": "Phường An Phú Đông",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26773",
+      "ward_name": "Phường Thới An",
+      "pdf_page_index": 43
+    },
+    {
+      "ward_code": "26782",
+      "ward_name": "Phường Tân Thới Hiệp",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26785",
+      "ward_name": "Phường Trung Mỹ Tây",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26791",
+      "ward_name": "Phường Đông Hưng Thuận",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26800",
+      "ward_name": "Phường Linh Xuân",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26803",
+      "ward_name": "Phường Tam Bình",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26809",
+      "ward_name": "Phường Hiệp Bình",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26824",
+      "ward_name": "Phường Thủ Đức",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26833",
+      "ward_name": "Phường Long Bình",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26842",
+      "ward_name": "Phường Tăng Nhơn Phú",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26848",
+      "ward_name": "Phường Phước Long",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26857",
+      "ward_name": "Phường Long Phước",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26860",
+      "ward_name": "Phường Long Trường",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26876",
+      "ward_name": "Phường An Nhơn",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26878",
+      "ward_name": "Phường An Hội Đông",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26882",
+      "ward_name": "Phường An Hội Tây",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26884",
+      "ward_name": "Phường Gò Vấp",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26890",
+      "ward_name": "Phường Hạnh Thông",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26898",
+      "ward_name": "Phường Thông Tây Hội",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26905",
+      "ward_name": "Phường Bình Lợi Trung",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26911",
+      "ward_name": "Phường Bình Quới",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26929",
+      "ward_name": "Phường Bình Thạnh",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26944",
+      "ward_name": "Phường Gia Định",
+      "pdf_page_index": 44
+    },
+    {
+      "ward_code": "26956",
+      "ward_name": "Phường Thạnh Mỹ Tây",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "26968",
+      "ward_name": "Phường Tân Sơn Nhất",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "26977",
+      "ward_name": "Phường Tân Sơn Hòa",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "26983",
+      "ward_name": "Phường Bảy Hiền",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "26995",
+      "ward_name": "Phường Tân Hòa",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27004",
+      "ward_name": "Phường Tân Bình",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27007",
+      "ward_name": "Phường Tân Sơn",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27013",
+      "ward_name": "Phường Tây Thạnh",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27019",
+      "ward_name": "Phường Tân Sơn Nhì",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27022",
+      "ward_name": "Phường Phú Thọ Hòa",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27028",
+      "ward_name": "Phường Phú Thạnh",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27031",
+      "ward_name": "Phường Tân Phú",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27043",
+      "ward_name": "Phường Đức Nhuận",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27058",
+      "ward_name": "Phường Cầu Kiệu",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27073",
+      "ward_name": "Phường Phú Nhuận",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27094",
+      "ward_name": "Phường An Khánh",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27097",
+      "ward_name": "Phường Bình Trưng",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27112",
+      "ward_name": "Phường Cát Lái",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27139",
+      "ward_name": "Phường Xuân Hòa",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27142",
+      "ward_name": "Phường Nhiêu Lộc",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27154",
+      "ward_name": "Phường Bàn Cờ",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27163",
+      "ward_name": "Phường Hòa Hưng",
+      "pdf_page_index": 45
+    },
+    {
+      "ward_code": "27169",
+      "ward_name": "Phường Diên Hồng",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27190",
+      "ward_name": "Phường Vườn Lài",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27211",
+      "ward_name": "Phường Hòa Bình",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27226",
+      "ward_name": "Phường Phú Thọ",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27232",
+      "ward_name": "Phường Bình Thới",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27238",
+      "ward_name": "Phường Minh Phụng",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27259",
+      "ward_name": "Phường Xóm Chiếu",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27265",
+      "ward_name": "Phường Khánh Hội",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27286",
+      "ward_name": "Phường Vĩnh Hội",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27301",
+      "ward_name": "Phường Chợ Quán",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27316",
+      "ward_name": "Phường An Đông",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27343",
+      "ward_name": "Phường Chợ Lớn",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27349",
+      "ward_name": "Phường Phú Lâm",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27364",
+      "ward_name": "Phường Bình Phú",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27367",
+      "ward_name": "Phường Bình Tây",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27373",
+      "ward_name": "Phường Bình Tiên",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27418",
+      "ward_name": "Phường Chánh Hưng",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27424",
+      "ward_name": "Phường Bình Đông",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27427",
+      "ward_name": "Phường Phú Định",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27439",
+      "ward_name": "Phường Bình Hưng Hòa",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27442",
+      "ward_name": "Phường Bình Tân",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27448",
+      "ward_name": "Phường Bình Trị Đông",
+      "pdf_page_index": 46
+    },
+    {
+      "ward_code": "27457",
+      "ward_name": "Phường Tân Tạo",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "27460",
+      "ward_name": "Phường An Lạc",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "27475",
+      "ward_name": "Phường Tân Hưng",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "27478",
+      "ward_name": "Phường Tân Thuận",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "27484",
+      "ward_name": "Phường Phú Thuận",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "27487",
+      "ward_name": "Phường Tân Mỹ",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "25777",
+      "ward_name": "Xã Dầu Tiếng",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "25780",
+      "ward_name": "Xã Minh Thạnh",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "25792",
+      "ward_name": "Xã Long Hòa",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "25807",
+      "ward_name": "Xã Thanh An",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "25819",
+      "ward_name": "Xã Trừ Văn Thố",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "25822",
+      "ward_name": "Xã Bàu Bàng",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "25858",
+      "ward_name": "Xã Phú Giáo",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "25864",
+      "ward_name": "Xã Phước Thành",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "25867",
+      "ward_name": "Xã An Long",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "25882",
+      "ward_name": "Xã Phước Hòa",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "25906",
+      "ward_name": "Xã Bắc Tân Uyên",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "25909",
+      "ward_name": "Xã Thường Tân",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "26545",
+      "ward_name": "Xã Long Sơn",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "26575",
+      "ward_name": "Xã Ngãi Giao",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "26584",
+      "ward_name": "Xã Xuân Sơn",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "26590",
+      "ward_name": "Xã Bình Giã",
+      "pdf_page_index": 47
+    },
+    {
+      "ward_code": "26596",
+      "ward_name": "Xã Châu Đức",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26608",
+      "ward_name": "Xã Kim Long",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26617",
+      "ward_name": "Xã Nghĩa Thành",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26620",
+      "ward_name": "Xã Hồ Tràm",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26632",
+      "ward_name": "Xã Xuyên Mộc",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26638",
+      "ward_name": "Xã Bàu Lâm",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26641",
+      "ward_name": "Xã Hòa Hội",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26647",
+      "ward_name": "Xã Hòa Hiệp",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26656",
+      "ward_name": "Xã Bình Châu",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26659",
+      "ward_name": "Xã Long Điền",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26662",
+      "ward_name": "Xã Long Hải",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26680",
+      "ward_name": "Xã Đất Đỏ",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26686",
+      "ward_name": "Xã Phước Hải",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "26728",
+      "ward_name": "Xã Châu Pha",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "27496",
+      "ward_name": "Xã Tân An Hội",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "27508",
+      "ward_name": "Xã An Nhơn Tây",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "27511",
+      "ward_name": "Xã Nhuận Đức",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "27526",
+      "ward_name": "Xã Thái Mỹ",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "27541",
+      "ward_name": "Xã Phú Hòa Đông",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "27544",
+      "ward_name": "Xã Bình Mỹ",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "27553",
+      "ward_name": "Xã Củ Chi",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "27559",
+      "ward_name": "Xã Hóc Môn",
+      "pdf_page_index": 48
+    },
+    {
+      "ward_code": "27568",
+      "ward_name": "Xã Đông Thạnh",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27577",
+      "ward_name": "Xã Xuân Thới Sơn",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27592",
+      "ward_name": "Xã Bà Điểm",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27595",
+      "ward_name": "Xã Tân Nhựt",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27601",
+      "ward_name": "Xã Vĩnh Lộc",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27604",
+      "ward_name": "Xã Tân Vĩnh Lộc",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27610",
+      "ward_name": "Xã Bình Lợi",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27619",
+      "ward_name": "Xã Bình Hưng",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27628",
+      "ward_name": "Xã Hưng Long",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27637",
+      "ward_name": "Xã Bình Chánh",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27655",
+      "ward_name": "Xã Nhà Bè",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27658",
+      "ward_name": "Xã Hiệp Phước",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27664",
+      "ward_name": "Xã Cần Giờ",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27667",
+      "ward_name": "Xã Bình Khánh",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27673",
+      "ward_name": "Xã An Thới Đông",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "27676",
+      "ward_name": "Xã Thạnh An",
+      "pdf_page_index": 49
+    },
+    {
+      "ward_code": "26732",
+      "ward_name": "Đặc khu Côn Đảo",
+      "pdf_page_index": 49
+    }
+  ]
+}

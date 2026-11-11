@@ -12,9 +12,13 @@ from crawl_experiment.core.errors import (
     LimitedReviewViewError,
     ReviewSurfaceError,
     SortError,
+    ChallengeError,
+    RateLimitedError,
 )
 
 from . import selectors
+from .deadline import StoreAttemptTimeout
+from .health import classify_page, HealthState
 
 logger = logging.getLogger(__name__)
 
@@ -164,12 +168,15 @@ class ReviewSurface:
         self.render_poll = render_poll
         self.clock = clock
         self.sleeper = sleeper
+        self.check_deadline = lambda: None
+        self.prepare_interaction = lambda: None
         self._last_pane = None
         self._last_sort_selector = None
         self.advertised_review_count = None
         self.last_control_diagnostics = {}
 
     def _review_controls(self):
+        self.check_deadline()
         """Historical CSS → XPath fallback plus visible localized text labels."""
         controls=[];seen=set()
         inventory=[];lookup_counts={}
@@ -229,8 +236,10 @@ class ReviewSurface:
 
     def open_reviews(self):
         try:
+            self.check_deadline()
             deadline=self.clock()+self.render_wait
             for attempt in range(3):
+                self.check_deadline()
                 buttons=self._review_controls()
                 if not buttons and self._safe_find(selectors.REVIEW_CARD):
                     logger.info('Review cards already open; reacquiring pane without another tab click')
@@ -253,13 +262,14 @@ class ReviewSurface:
                         return self.resolve_review_pane()
                     self._scroll_into_view(button)
                     self._wait_until_control_stable(button)
+                    self.prepare_interaction()
                     button.click()
                     return self.resolve_review_pane()
                 except (ElementClickInterceptedException,StaleElementReferenceException,ElementNotInteractableException) as exc:
                     logger.info('Reviews control recovery attempt=%s kind=%s',attempt+1,type(exc).__name__)
                     if attempt==2 or self.clock()>=deadline:raise
                     self.sleeper(self.retry_delay)
-        except ReviewSurfaceError:raise
+        except (ReviewSurfaceError, StoreAttemptTimeout, ChallengeError, RateLimitedError):raise
         except Exception as exc:
             error=ReviewSurfaceError(str(exc).splitlines()[0])
             error.local_review_tab_click_intercepted=isinstance(exc,ElementClickInterceptedException)
@@ -267,6 +277,7 @@ class ReviewSurface:
 
     def prepare_and_classify(self):
         """Open Reviews when possible, then classify before sort is attempted."""
+        self.check_deadline()
         initial_state, initial = self.classify_state()
         if initial_state in {
             ReviewSurfaceState.LIMITED,
@@ -300,6 +311,7 @@ class ReviewSurface:
         return state, pane, evidence
 
     def classify_state(self, pane=None):
+        self.check_deadline()
         review_tabs = self._review_controls()
         cards = self._cards_for_classification(pane)
         auth_dialogs = self._visible_elements(AUTH_DIALOG_SELECTOR)
@@ -351,14 +363,18 @@ class ReviewSurface:
         return ReviewSurfaceState.UNKNOWN, evidence
 
     def _cards_for_classification(self, pane):
+        self.check_deadline()
         try:
             if pane is not None and hasattr(pane, "find_elements"):
                 return pane.find_elements("css selector", selectors.REVIEW_CARD)
             return self._safe_find(selectors.REVIEW_CARD)
+        except StoreAttemptTimeout:
+            raise
         except Exception:  # noqa: BLE001
             return []
 
     def _safe_find(self, selector):
+        self.check_deadline()
         try:
             return self.driver.find_elements("css selector", selector)
         except Exception:  # noqa: BLE001
@@ -378,6 +394,7 @@ class ReviewSurface:
         best = None
         diagnostics = []
         while True:
+            self.check_deadline()
             candidates = self._pane_candidates()
             scored = [self._score_pane(pane, selector) for pane, selector in candidates]
             diagnostics = [entry[1] for entry in scored]
@@ -397,6 +414,7 @@ class ReviewSurface:
         )
 
     def _pane_candidates(self):
+        self.check_deadline()
         candidates = []
         seen_ids = set()
         for selector in (selectors.REVIEW_PANE_PRIMARY, *selectors.REVIEW_PANE_FALLBACKS):
@@ -471,24 +489,34 @@ class ReviewSurface:
     def sort_newest(self):
         last_error = None
         for attempt in range(3):
+            self.check_deadline()
             try:
                 self._sort_newest_once()
+                self.check_deadline()
                 return None
             except SortError as exc:
+                self.check_deadline()
+                self._raise_terminal_access()
                 last_error = exc
                 logger.info("Sort menu local attempt %d/3 failed: %s", attempt + 1, exc)
                 if attempt < 2:
                     self.sleeper(self.retry_delay)
 
+        self.check_deadline()
+        self._raise_terminal_access()
         logger.info("Re-entering Reviews surface after local sort retries")
         try:
             review_pane = self.open_reviews()
+        except (AuthRequiredError, LimitedReviewViewError):
+            raise
         except ReviewSurfaceError as exc:
             raise SortError(
                 f"{last_error}; Reviews re-entry failed: {exc}"
             ) from exc
         try:
+            self.check_deadline()
             self._sort_newest_once()
+            self.check_deadline()
             return review_pane
         except SortError as exc:
             raise SortError(
@@ -498,6 +526,7 @@ class ReviewSurface:
 
     def _sort_newest_once(self) -> None:
         try:
+            self.check_deadline()
             button = self._find_sort_button()
             if button is None:
                 raise SortError("sort button not found")
@@ -541,6 +570,7 @@ class ReviewSurface:
                     for label in labels
                     for target in newest_labels
                 ):
+                    self.prepare_interaction()
                     element.click()
                     if self._confirm_newest(button, element, newest_labels):
                         return
@@ -551,6 +581,7 @@ class ReviewSurface:
 
             if self._has_standard_radio_menu(items):
                 element = items[1][0]
+                self.prepare_interaction()
                 element.click()
                 if self._confirm_newest(button, element, newest_labels):
                     return
@@ -563,7 +594,7 @@ class ReviewSurface:
                 "Newest option not found; discovered sort menu items: "
                 f"{_described(items)}"
             )
-        except (AuthRequiredError, LimitedReviewViewError):
+        except (AuthRequiredError, LimitedReviewViewError, ChallengeError, RateLimitedError, StoreAttemptTimeout):
             raise
         except SortError:
             raise
@@ -571,6 +602,7 @@ class ReviewSurface:
             raise SortError(str(exc).splitlines()[0]) from exc
 
     def _find_sort_button(self):
+        self.check_deadline()
         selectors_to_try = (selectors.SORT_BUTTON, *SORT_BUTTON_FALLBACKS)
         for css_selector in selectors_to_try:
             candidates = self.driver.find_elements("css selector", css_selector)
@@ -618,6 +650,7 @@ class ReviewSurface:
         )
 
     def _scroll_into_view(self, button) -> None:
+        self.prepare_interaction()
         execute_script = getattr(self.driver, "execute_script", None)
         if execute_script:
             execute_script(
@@ -629,6 +662,7 @@ class ReviewSurface:
         previous = None
         deadline = self.clock() + min(self.render_wait, 1.0)
         while True:
+            self.check_deadline()
             if self._button_is_viable(button):
                 current = self._element_rect(button)
                 if current is None:
@@ -660,22 +694,43 @@ class ReviewSurface:
             )
         attempted = []
         for name, click in strategies:
+            self.prepare_interaction()
             attempted.append(name)
             try:
                 click()
+            except (AuthRequiredError, LimitedReviewViewError, ChallengeError, RateLimitedError, StoreAttemptTimeout):
+                raise
             except Exception as exc:  # noqa: BLE001 - strategy fallback
                 logger.debug("Sort button %s click failed: %s", name, str(exc).splitlines()[0])
             if self._wait_for_sort_menu():
                 return True, attempted
+            self.check_deadline()
+            self._raise_terminal_access()
         return False, attempted
 
+    def _raise_terminal_access(self):
+        self.check_deadline()
+        body = ' '.join(self._element_text(element) for element in self._safe_find('body'))
+        health = classify_page(getattr(self.driver, 'current_url', ''), body)
+        if health is HealthState.CHALLENGE:
+            raise ChallengeError('Google challenge during sort recovery')
+        if health is HealthState.RATE_LIMITED:
+            raise RateLimitedError('Google rate limit during sort recovery')
+        state, evidence = self.classify_state(self._last_pane)
+        if state is ReviewSurfaceState.AUTH_REQUIRED:
+            raise AuthRequiredError(f'Reviews require authentication: {evidence}')
+        if state is ReviewSurfaceState.LIMITED:
+            raise LimitedReviewViewError(f'Reviews limited: {evidence}')
+
     def _wait_for_sort_menu(self) -> bool:
+        self.check_deadline()
         if self._sort_menu_is_open():
             return True
         self.sleeper(min(self.render_poll, 0.25))
         return self._sort_menu_is_open()
 
     def _confirm_newest(self, button, option, newest_labels) -> bool:
+        self.check_deadline()
         self.sleeper(min(self.render_poll, 0.25))
         menu_open = self._sort_menu_is_open()
         selected, source = self._newest_selected_signal(
@@ -926,6 +981,7 @@ class ReviewSurface:
         return options
 
     def _visible_elements(self, css_selector: str) -> list[object]:
+        self.check_deadline()
         elements = self.driver.find_elements("css selector", css_selector)
         visible = []
         for element in elements:

@@ -36,6 +36,15 @@ def review_content_hash(review: Review) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# Persisted metadata whose changes merit an event. Relative date labels and
+# unstructured reviewer UI text are deliberately excluded (capture noise).
+REVIEW_METADATA_FIELDS = (
+    'store_id', 'review_url', 'reviewer_profile_url', 'reviewer_id',
+    'reviewer_avatar_url', 'reviewer_review_count', 'reviewer_photo_count',
+    'reviewer_is_local_guide',
+)
+
+
 class ReviewChange(str, Enum):
     INSERT = "INSERT"
     UPDATE = "UPDATE"
@@ -116,6 +125,7 @@ class ReviewRepository:
             ("published_at", "TEXT"), ("last_modified_at", "TEXT"), ("timestamp_source", "TEXT"),
             ("timestamp_status", "TEXT NOT NULL DEFAULT 'MISSING'"),
             ("change_diagnostics", "TEXT NOT NULL DEFAULT '[]'"),
+            ("metadata_json", "TEXT"), ("last_event_fingerprint", "TEXT"),
         ):
             if column not in columns:
                 self._db.execute(f"ALTER TABLE review_state ADD COLUMN {column} {definition}")
@@ -239,29 +249,52 @@ class ReviewRepository:
             published_at = review.published_at.isoformat() if trusted else None
             modified_at = review.last_modified_at.isoformat() if trusted else None
             previous_modified = current['last_modified_at'] if current else None
+            current_verified = bool(current and current['timestamp_status'] == 'VERIFIED')
             timestamp_increased = bool(trusted and previous_modified and
                 review.last_modified_at > datetime.fromisoformat(previous_modified))
             hash_changed = bool(current and current['content_hash'] != digest)
+            metadata = {field: getattr(review, field) for field in REVIEW_METADATA_FIELDS}
+            metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+            metadata_changed = bool(current and current['metadata_json'] != metadata_json)
+            timestamp_upgraded = bool(current and trusted and not current_verified)
+            timestamp_source_changed = bool(current_verified and trusted
+                                            and current['timestamp_source'] != review.timestamp_source)
+            event_fingerprint = hashlib.sha256(json.dumps(
+                [digest, metadata, published_at, modified_at, review.timestamp_status,
+                 review.timestamp_source], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
             diagnostics = []
             if hash_changed and trusted and previous_modified and not timestamp_increased:
                 diagnostics.append('HASH_CHANGED_WITHOUT_MODIFIED_AT_INCREASE')
-            if trusted and previous_modified and review.last_modified_at < datetime.fromisoformat(previous_modified):
+            stale = bool(trusted and previous_modified and
+                         review.last_modified_at < datetime.fromisoformat(previous_modified))
+            if stale:
                 diagnostics.append('LAST_MODIFIED_AT_REGRESSION')
-            if trusted and current and current['published_at'] and published_at != current['published_at']:
+            published_conflict = bool(trusted and current_verified and current['published_at']
+                                      and published_at != current['published_at'])
+            if published_conflict:
                 diagnostics.append('PUBLISHED_AT_CHANGED')
+            # Arrival order is not modification order. Keep conflicting/stale
+            # observations as evidence, without replacing the current state.
+            advance_current = not current or not (
+                stale or published_conflict or (current_verified and not trusted)
+                or (hash_changed and not timestamp_increased))
+            if current and hash_changed and not timestamp_increased and not stale:
+                diagnostics.append('CONTENT_ORDER_UNVERIFIED')
+            if not advance_current:
+                diagnostics.append('CURRENT_STATE_NOT_ADVANCED')
+            event_changed = (hash_changed or metadata_changed or timestamp_increased
+                             or timestamp_upgraded or timestamp_source_changed or published_conflict)
             change = (
                 ReviewChange.INSERT
                 if current is None
                 else ReviewChange.UPDATE
-                if hash_changed or timestamp_increased
+                if event_changed and current['last_event_fingerprint'] != event_fingerprint
                 else ReviewChange.UNCHANGED
             )
             was_inactive = False
             if current is not None:
-                active = self._db.execute("SELECT is_active,miss_count FROM review_state WHERE source=? AND source_review_id=?", review.identity).fetchone()
-                was_inactive = active is not None and int(active[0]) == 0
-                if active is not None:
-                    self._observed_previous[review.source_review_id] = (int(active[1]), not was_inactive)
+                was_inactive = int(current['is_active']) == 0
+                self._observed_previous[review.source_review_id] = (int(current['miss_count']), not was_inactive)
             if current is None:
                 self._db.execute(
                     "INSERT INTO review_state (source,source_review_id,store_id,content_hash,first_seen_at,last_seen_at,first_seen_run_id,last_seen_run_id,miss_count,is_active) VALUES(?,?,?,?,?,?,?,?,0,1)",
@@ -271,24 +304,26 @@ class ReviewRepository:
                 self._db.execute(
                     """UPDATE review_state SET store_id=?, content_hash=?, last_seen_at=?,
                        last_seen_run_id=?,miss_count=0,is_active=1 WHERE source=? AND source_review_id=?""",
-                    (review.store_id, digest, observed_at, self.run_id, *review.identity),
+                    (review.store_id if advance_current else current['store_id'],
+                     digest if advance_current else current['content_hash'],
+                     observed_at, self.run_id, *review.identity),
                 )
                 if was_inactive:
                     self._reactivated_ids.add(review.source_review_id)
-                    self._reactivation_miss_counts[review.source_review_id] = int(active[1]) if active is not None else 0
-            # Preserve trusted state across missing/failed captures and stale older batches.
-            source = review.timestamp_source
-            status = review.timestamp_status
-            if current and current['timestamp_status'] == 'VERIFIED':
-                published_at = current['published_at']
-                if not trusted or (previous_modified and modified_at and
-                    datetime.fromisoformat(modified_at) < datetime.fromisoformat(previous_modified)):
-                    modified_at = previous_modified
-                source, status = current['timestamp_source'], 'VERIFIED'
+                    self._reactivation_miss_counts[review.source_review_id] = int(current['miss_count'])
+            # Current-state values are separate from the incoming event values.
+            state_times = ((published_at, modified_at, review.timestamp_source, review.timestamp_status)
+                           if advance_current else
+                           (current['published_at'], current['last_modified_at'],
+                            current['timestamp_source'], current['timestamp_status']))
             self._db.execute("""UPDATE review_state SET published_at=?,last_modified_at=?,
-                timestamp_source=?,timestamp_status=?,change_diagnostics=?
+                timestamp_source=?,timestamp_status=?,change_diagnostics=?,metadata_json=?,
+                last_event_fingerprint=?
                 WHERE source=? AND source_review_id=?""",
-                (published_at, modified_at, source, status, json.dumps(diagnostics), *review.identity))
+                (*state_times, json.dumps(diagnostics),
+                 metadata_json if advance_current else current['metadata_json'],
+                 event_fingerprint if change.emitted else current['last_event_fingerprint'],
+                 *review.identity))
             if change.emitted and self.parquet_writer is not None:
                 payload = {
                     "run_id": self.run_id, "source": review.source,
@@ -302,14 +337,17 @@ class ReviewRepository:
                         "reviewer_metadata_raw", "reviewer_review_count", "reviewer_photo_count",
                         "reviewer_is_local_guide")},
                     "published_at": published_at, "last_modified_at": modified_at,
-                    "timestamp_source": source, "timestamp_status": status,
+                    "timestamp_source": review.timestamp_source, "timestamp_status": review.timestamp_status,
                     "change_diagnostics": diagnostics,
                     "observed_at": observed_at,
                     "content_hash": digest, "change_type": change.value,
                 }
-                event_id = hashlib.sha256(
-                    f"{self.run_id}\0{review.source}\0{review.source_review_id}\0{digest}\0{modified_at}\0{observed_at}".encode()
-                ).hexdigest()
+                event_key = f"{self.run_id}\0{review.source}\0{review.source_review_id}\0{digest}\0{modified_at}\0{observed_at}"
+                if change is ReviewChange.UPDATE and not hash_changed and not timestamp_increased:
+                    # Distinct metadata updates can share a clock value. Existing
+                    # pending IDs are never recomputed during migration/replay.
+                    event_key += f"\0metadata:{event_fingerprint}"
+                event_id = hashlib.sha256(event_key.encode()).hexdigest()
                 self._db.execute(
                     "INSERT OR IGNORE INTO pending_review_events VALUES(?,?,?,?,?,?)",
                     (event_id, review.source, review.source_review_id, digest,

@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 
 from crawl_experiment.core.errors import PaginationStalledError
+from .deadline import StoreAttemptTimeout
 
 from . import selectors
 
@@ -53,18 +54,18 @@ class ReviewPaginator:
         self.wait_seconds = wait_seconds
         self.wait_interval = wait_interval
         self.sleeper = sleeper
+        self.prepare_interaction = lambda: None
         self.state = PaginationState(last_progress_at=clock())
 
     def cards(self):
+        self.check_deadline()
         pane_find_elements = getattr(self.pane, "find_elements", None)
         if pane_find_elements is not None:
             return pane_find_elements("css selector", selectors.REVIEW_CARD)
         return self.driver.find_elements("css selector", selectors.REVIEW_CARD)
 
     def observe(self, cards) -> int:
-        ids = {c.get_attribute(selectors.REVIEW_ID_ATTRIBUTE) for c in cards}
-        ids.discard(None)
-        ids.discard("")
+        ids = self._review_ids(cards)
         self.state.last_new_ids = ids - self.state.seen_ids
         new_count = len(self.state.last_new_ids)
         self.state.seen_ids.update(ids)
@@ -91,12 +92,15 @@ class ReviewPaginator:
         return None
 
     def scroll(self) -> dict[str, object]:
+        self.check_deadline()
         scroll_started = self.clock()
         locate_started = self.clock()
         before_cards = self.cards()
         locate_cards_ms = (self.clock() - locate_started) * 1000
         before_ids = self._review_ids(before_cards)
         before_metrics = self._pane_metrics()
+        self.prepare_interaction()
+        self.check_deadline()
         result = self.driver.execute_script(selectors.SCROLL_TO_END_SCRIPT, self.pane)
         self.state.scroll_count += 1
         after_metrics = self._metrics_from_script_result(result) or self._pane_metrics()
@@ -136,16 +140,27 @@ class ReviewPaginator:
             raise PaginationStalledError("review pagination stopped progressing")
 
     def _wait_for_dom_growth(self, before_ids: set[str]):
+        self.check_deadline()
         cards = self.cards()
         max_polls = max(1, int(self.wait_seconds / self.wait_interval))
         for _ in range(max_polls):
+            self.check_deadline()
             if self._review_ids(cards) - before_ids:
                 return cards
-            self.sleeper(self.wait_interval)
+            remaining = self.deadline - self.clock() if self.deadline is not None else self.wait_interval
+            self.sleeper(min(self.wait_interval, remaining))
+            self.check_deadline()
             cards = self.cards()
         return cards
 
+    def check_deadline(self):
+        if self.deadline is not None and self.clock() >= self.deadline:
+            self.state.timed_out = True
+            raise StoreAttemptTimeout('Store attempt time budget exhausted during pagination')
+
     def _pane_metrics(self) -> dict[str, float | None]:
+        self.prepare_interaction()
+        self.check_deadline()
         result = self.driver.execute_script(
             """
             const pane = arguments[0];
@@ -191,9 +206,11 @@ class ReviewPaginator:
             and top + height >= total - 2
         )
 
-    @staticmethod
-    def _review_ids(cards) -> set[str]:
-        ids = {card.get_attribute(selectors.REVIEW_ID_ATTRIBUTE) for card in cards}
+    def _review_ids(self, cards) -> set[str]:
+        ids = set()
+        for card in cards:
+            self.check_deadline()
+            ids.add(card.get_attribute(selectors.REVIEW_ID_ATTRIBUTE))
         ids.discard(None)
         ids.discard("")
         return ids
