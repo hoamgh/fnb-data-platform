@@ -9,9 +9,18 @@ permissions:
   contents: read
 
 jobs:
-  offline-tests:
+  fixture-tests:
+    name: ${{ matrix.profile }}
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: offline
+            extras: test
+          - profile: dbt-integration
+            extras: test,dbt
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -20,18 +29,15 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
       - name: Install package and test dependencies
-        run: python -m pip install ".[test]"
-      - name: Run offline fixture tests
-        run: python -B scripts/run_offline_tests.py
-      - name: Run pipeline and address enrichment offline regressions
-        run: >-
-          python -B -m pytest
-          tests/test_overture_eligibility.py tests/test_spatial_prededup.py
-          tests/test_google_silver.py tests/test_comparison_features.py
-          tests/test_entity_resolution.py tests/test_entity_resolution_v2.py
-          tests/test_entity_resolution_v3.py tests/test_google_address_enrichment.py
-          tests/test_address_reference_pilot.py
-          tests/test_google_candidate_ranking.py tests/test_google_poi_input.py
-          -q -p no:cacheprovider --basetemp "${{ runner.temp }}/fnb-pipeline-pytest"
+        run: python -m pip install ".[${{ matrix.extras }}]"
+      - name: Run explicit fixture profile
+        run: python -B scripts/run_offline_tests.py --profile ${{ matrix.profile }} --results-dir "${{ runner.temp }}/fnb-test-results"
+      - name: Preserve test logs and summaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fnb-${{ matrix.profile }}-results
+          path: ${{ runner.temp }}/fnb-test-results/
+          if-no-files-found: warn
