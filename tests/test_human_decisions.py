@@ -274,7 +274,7 @@ def test_os_lock_blocks_concurrent_writer_and_recovers_after_process_death(tmp_p
     with h.publication_lock(tmp_path):
         with pytest.raises(ValueError, match="Another"):
             with h.publication_lock(tmp_path):pass
-    env = dict(os.environ); env["PYTHONPATH"] = str(Path(h.__file__).parents[1])
+    env = dict(os.environ); env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     code = "import os,sys;from pathlib import Path;from fnb_platform.human_decisions import publication_lock;\nwith publication_lock(Path(sys.argv[1])): os._exit(0)"
     subprocess.run([sys.executable, "-c", code, str(tmp_path)], env=env, check=True, timeout=20)
     with h.publication_lock(tmp_path):pass

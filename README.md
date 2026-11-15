@@ -123,7 +123,7 @@ Offline publishers validate versioned artifacts before replacing `current.json`.
 ## Project structure
 
 ```text
-src/fnb_platform/       Catalog, Silver, comparison, ER, human policy, Gold/Area staging
+src/fnb_platform/       overture/, google/, integration/, gold/, reference/ domains
 crawl_experiment/      Google acquisition, persistence, checkpoints and recovery
 scripts/               Worker runners and offline CLI wrappers
 pipelines/             Gold staging and Area Enrichment dbt models/tests
@@ -133,6 +133,8 @@ tests/                 Catalog, crawler, processing and regression fixtures
 docs/                  Implementation reports, design targets and evidence ledger
 requirements/          Pinned offline baseline dependencies
 ```
+
+Canonical modules, compatible CLI paths and debugging steps: [module layout guide](docs/MODULE_LAYOUT.md).
 
 ## Quick start
 
