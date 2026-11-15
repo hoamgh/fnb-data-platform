@@ -13,7 +13,7 @@ import uuid
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from . import er_category_review_export as review, human_decisions as human, google_silver as silver
+from . import er_category_review_export as review, human_decisions as human, google_silver as silver, publication
 from .overture_incremental import _digest
 
 VERSION = "er-hybrid-shadow-v1"
@@ -279,7 +279,7 @@ def publish(er_root, category_root, human_root, ai_csv, ai_audit, output_root, p
         hashes[str(p)] = silver.sha(p)
     provenance = dict(input_hashes=hashes, human_release=str(active) if active else None, human_history_unchanged=True)
     table, summary = build(data, google, history, machine, policy, provenance)
-    code = [Path(__file__), Path(human.__file__), Path(review.__file__), Path(silver.__file__), Path(__file__).with_name("overture_incremental.py")]
+    code = [Path(__file__), Path(human.__file__), Path(review.__file__), Path(silver.__file__), Path(__file__).with_name("overture_incremental.py"), Path(publication.__file__)]
     signature = dict(rule_version=VERSION, policy_version=policy["policy_version"], mode="SHADOW_ONLY", inputs_sha256=hashes,
         human_pointer_sha256=pointer_hash, code_sha256={str(p.resolve()): silver.sha(p) for p in code},
         logical_sha256=_digest(table.to_pylist()), pyarrow_version=pa.__version__)

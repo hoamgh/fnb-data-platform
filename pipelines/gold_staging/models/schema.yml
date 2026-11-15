@@ -1,5 +1,26 @@
 version: 2
 models:
+  - name: review_attachment
+    columns:
+      - name: logical_review_id
+        data_tests: [unique, not_null]
+      - name: source_review_id
+        data_tests: [not_null]
+      - name: current_observation_id
+        data_tests: [not_null]
+      - name: store_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_store')
+                field: store_id
+  - name: unmatched_review_accounting
+    columns:
+      - name: logical_review_id
+        data_tests: [unique, not_null]
+      - name: source_review_id
+        data_tests: [not_null]
   - name: dim_store
     columns:
       - name: store_id

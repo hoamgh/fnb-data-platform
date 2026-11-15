@@ -14,8 +14,8 @@ import sqlite3
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from . import google_silver as s
-from .gold_staging import check_hashes, publish_release, require
+from . import google_silver as s, publication
+from .publication import check_hashes, require
 from .overture_incremental import _digest
 from crawl_experiment.core.models import Review
 from crawl_experiment.storage.review_repository import review_content_hash
@@ -24,6 +24,11 @@ VERSION = 'google-reviews-silver-v1'
 ROOT = Path(__file__).resolve().parents[2]
 KEY = ('google_id_kind', 'google_identity_value')
 UTC = pa.timestamp('us', tz='UTC')
+
+
+def publish_release(output, signature, writer, *, guard=lambda:None, fault=lambda stage:None):
+    return publication.publish_release(output, signature, writer, guard=guard, fault=fault,
+        read_active=s.read_active, verify_release=s.verify_release, digest=_digest, dump=s.dump)
 
 
 def strings(fields):
@@ -254,7 +259,8 @@ def normalize_event(raw, bridge, path, row_index, event_id, file_sha):
 
 QUARANTINE = {'SOURCE_MISSING_OR_UNSUPPORTED', 'STABLE_REVIEW_ID_MISSING_OR_INVALID', 'UNRESOLVED_GOOGLE_BINDING',
     'EVENT_STORE_ID_MISMATCH', 'CROSS_IDENTITY_REVIEW_CONFLICT', 'DUPLICATE_EVENT_BINDING_CONFLICT',
-    'CONTENT_HASH_MISMATCH', 'CONTENT_HASH_MISSING_OR_INVALID', 'CURRENT_STATE_NOT_ADVANCED'}
+    'CONTENT_HASH_MISMATCH', 'CONTENT_HASH_MISSING_OR_INVALID', 'CURRENT_STATE_NOT_ADVANCED',
+    'OBSERVED_AT_MISSING_OR_INVALID', 'EVENT_TYPE_UNRECOGNIZED', 'REVIEW_TIMESTAMP_AFTER_OBSERVATION'}
 
 
 def resolve_events(events):
@@ -368,12 +374,17 @@ def transform(roots, places, tracked):
             inp = tracked.json(job / 'input.json')
             sid = inp.get('store', {}).get('id')
             database = job / 'reviews.sqlite3'
+            state_ids = set()
             if database.exists():
                 wal = database.with_name(database.name + '-wal')
                 require(not wal.exists() or wal.stat().st_size == 0, 'Nonempty SQLite WAL: freeze input before staging')
                 with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
                     pending = db.execute('select count(*) from pending_review_events').fetchone()[0]
                     count = db.execute('select count(*) from review_state').fetchone()[0]
+                    columns = {r[1] for r in db.execute('pragma table_info(review_state)')}
+                    require({'source', 'source_review_id'} <= columns,
+                            'Unsupported review_state identity schema: ' + str(database))
+                    state_ids = set(db.execute('select source, source_review_id from review_state'))
                 require(pending == 0, 'Unflushed review outbox: ' + str(database))
                 stats['sqlite_state_rows'] += count
             captures = sorted(p for p in (job / 'crawl').glob('*') if p.is_dir())
@@ -399,6 +410,18 @@ def transform(roots, places, tracked):
                     raw_rows.append(raw)
                     event = normalize_event(raw, bridge, path, position, footer[position] if footer else None, tracked.hashes[str(path.resolve())])
                     events.append((event, _digest(raw))); run_rows += 1
+            # SQLite is job-scoped, not capture-scoped. INSERT and all UPDATEs
+            # across that job's captures provide evidence for one logical ID.
+            # Match raw persisted identities before deduplication/quarantine;
+            # neither pending payloads nor state can reconstruct observations.
+            persisted_ids = {(raw.get('source'), raw.get('source_review_id'))
+                             for _, _, rows in by_capture.values() for raw in rows}
+            missing = state_ids - persisted_ids
+            require(not missing,
+                    'Missing persisted review identity coverage: '
+                    f'{len(missing)} identities in {database}; '
+                    'state-only/historical inputs without persisted evidence are unsupported '
+                    '(logical identity coverage only; full event history not proven)')
             for bridge, observed, raw_rows in by_capture.values():
                 if bridge['binding_status'] != 'BOUND': continue
                 capture = Path(bridge['capture_ref']); details = {}
@@ -491,10 +514,47 @@ def validate(tables, place_keys, raw_count):
     require(all(not r['is_complete_google_review_coverage'] for r in inventory), 'Unverified complete-coverage assertion')
 
 
+def verify_release(directory, places):
+    """Read-only admission of published evidence; never rebuild source events."""
+    directory = Path(directory)
+    require((directory / 'manifest.json').is_file(), 'Missing Reviews Silver manifest')
+    manifest = s.verify_release(directory)
+    signature = manifest['signature']
+    require(manifest.get('publication_kind') == 'GOOGLE_REVIEWS_SILVER_OFFLINE'
+            and signature.get('publication_kind') == 'GOOGLE_REVIEWS_SILVER_OFFLINE'
+            and signature.get('rule_version') == VERSION, 'Unsupported Reviews Silver contract')
+    require(manifest.get('release_id') == directory.name == _digest(signature)[:24],
+            'Reviews Silver release identity mismatch')
+    schemas = {'review_identity_bridge.parquet': BRIDGE_SCHEMA,
+               'silver_review_observations.parquet': OBS_SCHEMA,
+               'silver_reviews_current.parquet': CURRENT_SCHEMA,
+               'review_collection_inventory.parquet': INVENTORY_SCHEMA,
+               'excluded_review_files_inventory.parquet': EXCLUDED_SCHEMA}
+    require(set(manifest['artifacts']) == set(schemas) | {'summary.json', 'review_dq_summary.json'},
+            'Incomplete/unsupported Reviews Silver artifacts')
+    tables = {}
+    for name, schema in schemas.items():
+        table = pq.ParquetFile(directory / name).read()
+        require(table.schema.equals(schema, check_metadata=False), 'Unsupported Reviews Silver schema: ' + name)
+        tables[name] = table
+    summary = json.loads((directory / 'review_dq_summary.json').read_text(encoding='utf-8'))
+    count = summary.get('persisted_event_count')
+    require(type(count) is int and count >= 0 and summary.get('hard_failures') == 0,
+            'Invalid Reviews Silver integrity summary')
+    require(summary.get('observation_count') == tables['silver_review_observations.parquet'].num_rows
+            and summary.get('unique_logical_review_count') == tables['silver_reviews_current.parquet'].num_rows,
+            'Reviews Silver summary coverage mismatch')
+    validate(tables, places, count)
+    require(all(not row['current_eligible'] or not QUARANTINE.intersection(row['dq_flags'])
+                for row in tables['silver_review_observations.parquet'].to_pylist()),
+            'Unsupported historical Reviews Silver current eligibility')
+    return manifest
+
+
 def publish(google_root, output_root, *, fault=lambda stage:None):
     tracked, roots, places, release, files = load_inputs(google_root)
     legacy, legacy_hashes = scan_legacy(roots)
-    code_paths = [Path(__file__), ROOT / 'src/fnb_platform/google_silver.py', ROOT / 'src/fnb_platform/gold_staging.py',
+    code_paths = [Path(__file__), ROOT / 'src/fnb_platform/google_silver.py', Path(publication.__file__),
         ROOT / 'src/fnb_platform/overture_incremental.py', ROOT / 'crawl_experiment/storage/review_repository.py',
         ROOT / 'crawl_experiment/core/models.py']
     signature = dict(rule_version=VERSION, publication_kind='GOOGLE_REVIEWS_SILVER_OFFLINE',

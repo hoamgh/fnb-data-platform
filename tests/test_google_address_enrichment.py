@@ -188,15 +188,20 @@ def published_inputs(tmp_path):
         for name,content in artifacts.items():
             path=dest/name;path.parent.mkdir(parents=True,exist_ok=True)
             if isinstance(content,list):
-                pq.write_table(pa.Table.from_pylist(content),path)
-                specs[name]=dict(sha256=s.sha(path),rows=len(content),logical_sha256=_digest(content))
+                schema={'silver/google_places.parquet':s.PLACE_SCHEMA,
+                        'silver/source_links.parquet':s.LINK_SCHEMA}.get(name)
+                table=pa.Table.from_pylist(content,schema=schema)
+                pq.write_table(table,path)
+                if schema is not None:
+                    assert pq.ParquetFile(path).schema_arrow.equals(schema)
+                specs[name]=dict(sha256=s.sha(path),rows=table.num_rows,logical_sha256=_digest(table.to_pylist()))
             else:
                 path.write_text(json.dumps(content),encoding='utf-8');specs[name]=dict(sha256=s.sha(path))
         (dest/'manifest.json').write_text(json.dumps(dict(signature=signature,artifacts=specs)),encoding='utf-8')
         (root/'current.json').write_text(json.dumps(dict(release_id='a'*24,manifest_sha256=s.sha(dest/'manifest.json'))),encoding='utf-8')
         return dest
     mroot=tmp_path/'m1'
-    mr=release(mroot,{'silver/google_places.parquet':g,'silver/source_links.parquet':[{k:e[0][k] for k in ['overture_id',*a.KEY]}],
+    mr=release(mroot,{'silver/google_places.parquet':g,'silver/source_links.parquet':[{k:e[0][k] for k in ['overture_id',*a.KEY,'er_status']}],
         'reports/google_silver_dq_summary.json':{'zero_candidate_inventory':z}},dict(inputs_sha256={str(ov.resolve()):s.sha(ov)}))
     eroot=tmp_path/'er'
     release(eroot,{'er_results.parquet':e},dict(rule_version=a.ER_VERSION,inputs_sha256={str(p.resolve()):s.sha(p) for p in [ov,mr/'silver/google_places.parquet',mr/'silver/source_links.parquet']}))
@@ -209,7 +214,7 @@ def test_atomic_publication_and_idempotence(published_inputs,tmp_path):
     protected={p:s.sha(p) for root in [m,e] for p in root.rglob('*') if p.is_file()}
     def fail(stage):
         if stage=='after_stage_validation':raise RuntimeError('injected')
-    with pytest.raises(RuntimeError):a.publish(m,e,out,labels,fault=fail)
+    with pytest.raises(RuntimeError,match='injected'):a.publish(m,e,out,labels,fault=fail)
     assert not (out/'current.json').exists() and not (out/'.publish.lock').exists()
     r,one=a.publish(m,e,out,labels);pointer=(out/'current.json').read_bytes()
     r2,two=a.publish(m,e,out,labels)

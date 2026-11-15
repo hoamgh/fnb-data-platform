@@ -326,9 +326,9 @@ def test_campaign_signature_detects_deadline_only_change(monkeypatch):
     from scripts import google_m2_batch as batch
     before = batch.campaign_code_fingerprints()
     deadline = batch.ROOT/'crawl_experiment/sources/google_maps/deadline.py'
-    original = batch.e.m242.sha
+    original = batch.e.sha
     # Simulate edited bytes without changing the actual working tree or evidence.
-    monkeypatch.setattr(batch.e.m242, 'sha', lambda path:
+    monkeypatch.setattr(batch.e, 'sha', lambda path:
         hashlib.sha256(path.read_bytes() + b'\n# changed deadline\n').hexdigest()
         if path == deadline else original(path))
     after = batch.campaign_code_fingerprints()

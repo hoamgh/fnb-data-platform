@@ -244,3 +244,85 @@ def test_real_dbt_fixtures_nulls_no_fanout_and_deterministic_rebuild(tmp_path):
     assert mart['00001']['poi_anchors_per_km2'] is None and mart['00001']['poi_anchors_per_1000_population'] is None
     again=tmp_path/'again';again.mkdir();replay,_=a.dbt_build(again,paths)
     assert all(tables[k].equals(replay[k]) for k in tables)
+
+
+def freshness_inputs(tmp_path, state='absent'):
+    from fnb_platform import gold_staging as g, human_decisions as h
+    snapshot, codes = write_snapshot(tmp_path)
+    reference_root = tmp_path/'reference'
+    d.publish_silver(snapshot, reference_root, codes_path=codes)
+    human_root = tmp_path/'human'
+    if state == 'present':
+        g.publish_release(human_root, dict(rule_version=h.VERSION, publication_kind='HUMAN_DECISIONS_NOT_GOLD',
+            inputs_sha256={}, code_sha256={}),
+            lambda stage,rid: ({'decision_history.parquet':pa.Table.from_pylist([],schema=h.HISTORY_SCHEMA)}, {}, []))
+    elif state == 'invalid':
+        human_root.mkdir(); (human_root/'current.json').write_text('invalid pointer')
+    pointer = human_root/'current.json'
+    policy = dict(rule_version=g.ACTIVE_VERSION, publication_kind='ACTIVE_EFFECTIVE_MAPPING_FOR_GOLD_STAGING',
+                  inputs_sha256={}, code_sha256={}, human_root=str(human_root.resolve()),
+                  human_pointer_sha256=s.sha(pointer) if pointer.exists() else None)
+    mapping, _ = g.publish_release(tmp_path/'mapping', policy,
+        lambda stage,rid: ({'effective_identity_mapping.parquet':pa.Table.from_pylist([],schema=g.ACTIVE_SCHEMA)}, {}, []))
+    pins = {str(p.resolve()):s.sha(p) for p in (mapping/'manifest.json',mapping/'effective_identity_mapping.parquet')}
+    catalog_root = tmp_path/'catalog'
+    g.publish_release(catalog_root, dict(rule_version=g.STAGING_VERSION,
+        publication_kind='CANONICAL_GOLD_STAGING_NOT_PRODUCTION', inputs_sha256=pins, code_sha256={}),
+        lambda stage,rid: ({'dim_store.parquet':pa.Table.from_pylist([anchor()])}, {}, []))
+    return reference_root, catalog_root, pointer
+
+
+@pytest.mark.parametrize('state', ['absent','present'])
+def test_human_freshness_admission_and_expected_state(tmp_path, state):
+    reference, catalog, pointer = freshness_inputs(tmp_path, state)
+    _, _, refs, guard = a.pin_inputs(reference, catalog)
+    assert refs['human_state']['sha256'] == (s.sha(pointer) if state == 'present' else None)
+    guard()
+    pointer.parent.mkdir(exist_ok=True)
+    pointer.write_text('new human state')
+    with pytest.raises(ValueError, match='Human decisions changed'):
+        a.pin_inputs(reference, catalog)
+    with pytest.raises(ValueError, match='Human decisions changed'):
+        guard()
+
+
+def test_invalid_pinned_human_pointer_is_not_absent(tmp_path):
+    reference, catalog, _ = freshness_inputs(tmp_path, 'invalid')
+    with pytest.raises(ValueError, match='Invalid human pointer or release'):
+        a.pin_inputs(reference, catalog)
+
+
+@pytest.mark.parametrize('state', ['absent','present'])
+@pytest.mark.parametrize('reuse', [False,True])
+def test_build_final_human_guard_blocks_fresh_and_reused_activation(tmp_path, monkeypatch, state, reuse):
+    reference, catalog, pointer = freshness_inputs(tmp_path, state)
+    # Exercise build admission and the real publication/guard lifecycle without
+    # rerunning dbt for each race; dbt models have a separate integration test.
+    publisher = a.publish_release
+    def publish(output, signature, writer, **kwargs):
+        return publisher(output, signature,
+            lambda stage,rid: ({'guard_fixture.parquet':pa.table({'id':['fixture']})}, {}, []), **kwargs)
+    monkeypatch.setattr(a, 'publish_release', publish)
+    out = tmp_path/'area'
+    prior, _ = a.build(reference, catalog, out)
+    code = s.verify_release(prior)['signature']['code_sha256']
+    assert str(Path(a.consumer.__file__).resolve()) in code
+    assert Path(a.consumer.__file__).name == 'silver.py'
+    previous = (out/'current.json').read_bytes()
+    checksums = {p:s.sha(p) for p in prior.rglob('*') if p.is_file()}
+    assert a.build(reference, catalog, out)[0] == prior
+    original = pointer.read_bytes() if pointer.exists() else None
+    boundary_m = 10.0 if reuse else 11.0
+    def change(phase):
+        if phase == 'before_pointer_replace':
+            pointer.parent.mkdir(exist_ok=True)
+            pointer.write_text('changed at activation')
+    with pytest.raises(ValueError, match='Human decisions changed'):
+        a.build(reference, catalog, out, near_boundary_m=boundary_m, fault=change)
+    assert (out/'current.json').read_bytes() == previous and s.read_active(out) == prior
+    assert checksums == {p:s.sha(p) for p in checksums}
+    assert len(list((out/'releases').iterdir())) == (1 if reuse else 2)
+    if original is not None:
+        pointer.write_bytes(original)
+        recovered, _ = a.build(reference, catalog, out, near_boundary_m=boundary_m)
+        assert a.build(reference, catalog, out, near_boundary_m=boundary_m)[0] == recovered

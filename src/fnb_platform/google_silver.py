@@ -609,6 +609,13 @@ def verify_release(directory):
             raise ValueError("Artifact checksum mismatch: " + relative)
         if relative.endswith(".parquet"):
             table = pq.ParquetFile(path).read()
+            # These are the publisher's existing contracts, also for historical
+            # manifests without a schema declaration. Ignore only Arrow metadata;
+            # never infer/cast types from values or trust the manifest's schema.
+            expected = {"silver/google_places.parquet": PLACE_SCHEMA,
+                        "silver/source_links.parquet": LINK_SCHEMA}.get(relative)
+            if expected is not None and not table.schema.equals(expected, check_metadata=False):
+                raise ValueError("Artifact Arrow schema mismatch: " + relative)
             if table.num_rows != spec["rows"] or _digest(table.to_pylist()) != spec["logical_sha256"]:
                 raise ValueError("Artifact logical mismatch: " + relative)
     return manifest

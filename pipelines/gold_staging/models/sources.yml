@@ -1,5 +1,11 @@
 version: 2
 sources:
+  - name: pinned_reviews
+    tables:
+      - name: current
+        config:
+          enabled: "{{ var('reviews_enabled', false) }}"
+          external_location: "{{ var('reviews_current_path', '') }}"
   - name: pinned
     tables:
       - name: overture

@@ -7,11 +7,115 @@ import pyarrow.parquet as pq
 import pytest
 from shapely.geometry import Point
 
-from experiments.overture_gold_contract import eligibility as e
+from fnb_platform.overture import eligibility as e
 
 
 COUNTS = {"silver_rows": 4, "inside_ward": 3, "original_candidates": 1,
           "hierarchy_additions": 1, "candidates": 2, "missing_from_release": 1}
+
+
+def test_eligibility_legacy_module_policy_and_monkeypatch_compatibility(monkeypatch):
+    import importlib
+    from experiments.overture_gold_contract import m242, spatial_prededup
+    from scripts import google_m2_batch
+    from fnb_platform.overture import silver
+    legacy = importlib.import_module('experiments.overture_gold_contract.eligibility')
+    assert legacy is e and spatial_prededup.e is e and google_m2_batch.e is e
+    assert not hasattr(e, 'm242') and e.consumer is silver
+    assert m242._policy is e.policy
+    root = Path(__file__).resolve().parents[1]
+    assert e.ROOT == root
+    assert Path(e.__file__).resolve() == root/'src/fnb_platform/overture/eligibility.py'
+    assert e.BOUNDARY == Path('config/admin_areas/phuong_khanh_hoi.geojson')
+    monkeypatch.setattr(legacy, 'POLICY', 'fixture-monkeypatch-policy')
+    assert e.build_tables.__globals__['POLICY'] == legacy.POLICY
+
+
+@pytest.mark.parametrize('filename', ['src/fnb_platform/overture/eligibility.py',
+                                    'src/fnb_platform/overture/eligibility_policy.py',
+                                    'experiments/overture_gold_contract/eligibility.py'])
+def test_campaign_fingerprint_covers_eligibility_and_wrapper(monkeypatch, filename):
+    import hashlib
+    from scripts import google_m2_batch as batch
+    before = batch.campaign_code_fingerprints()
+    assert {'src/fnb_platform/overture/eligibility.py',
+            'src/fnb_platform/overture/eligibility_policy.py',
+            'experiments/overture_gold_contract/eligibility.py'} <= {name.replace('\\','/') for name in before}
+    target = e.ROOT/filename
+    checksum = e.sha
+    monkeypatch.setattr(e, 'sha', lambda path:
+        hashlib.sha256(Path(path).read_bytes()+b'\n# simulated change').hexdigest()
+        if Path(path) == target else checksum(path))
+    after = batch.campaign_code_fingerprints()
+    assert [name.replace('\\','/') for name in before if before[name] != after[name]] == [filename]
+
+
+@pytest.mark.parametrize('legacy', [True, False])
+def test_eligibility_old_and_new_cli_help(legacy):
+    import os
+    import subprocess
+    import sys
+    env = dict(os.environ)
+    if legacy:
+        env.pop('PYTHONPATH', None)
+        command = [sys.executable,'-B',str(e.ROOT/'experiments/overture_gold_contract/eligibility.py'),'--help']
+    else:
+        env['PYTHONPATH'] = str(e.ROOT/'src')
+        command = [sys.executable,'-B','-m','fnb_platform.overture.eligibility','--help']
+    result = subprocess.run(command,cwd=e.ROOT,env=env,capture_output=True,text=True,timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert '--input-root' in result.stdout and '--output-root' in result.stdout
+
+
+def test_canonical_eligibility_import_has_no_historical_code_dependency(tmp_path):
+    import os
+    import subprocess
+    import sys
+    env = dict(os.environ, PYTHONPATH=str(e.ROOT/'src'))
+    code = ('import sys; from fnb_platform.overture import eligibility as e; '
+            'assert not hasattr(e,"m242"); '
+            'assert not any(n=="experiments" or n.startswith("experiments.") for n in sys.modules); '
+            'assert e.policy.__name__=="fnb_platform.overture.eligibility_policy"')
+    result = subprocess.run([sys.executable,'-B','-c',code],cwd=tmp_path,env=env,
+                            capture_output=True,text=True,timeout=30)
+    assert result.returncode == 0, result.stderr
+
+
+def test_historical_audit_preserves_policy_geometry_hooks_and_defaults(inputs, monkeypatch):
+    from experiments.overture_gold_contract import m242
+    paths = dict(historical_path=inputs/e.HIST,
+                 silver_path=inputs/e.SILVER_ROOT/'releases'/e.RELEASE/'current_state.parquet',
+                 source_path=inputs/e.SOURCE_DIR/'new.parquet',boundary_path=inputs/e.BOUNDARY)
+    expected = e.analyze(**paths)
+    assert m242.HIST == e.ROOT/e.HIST
+    assert m242.SILVER == e.ROOT/e.SILVER_ROOT/'releases'/e.RELEASE/'current_state.parquet'
+    assert m242.SOURCE == e.ROOT/e.SOURCE_DIR/'new.parquet'
+    assert m242.BOUNDARY == e.ROOT/e.BOUNDARY
+    assert m242.analyze.__kwdefaults__ == dict(historical_path=m242.HIST,
+        silver_path=m242.SILVER,source_path=m242.SOURCE,boundary_path=m242.BOUNDARY)
+    calls = {}
+    for name in ('taxonomy_decision','eligibility','historical_inside','from_wkb','shape'):
+        original = getattr(m242,name)
+        def observed(*args,_name=name,_original=original,**kwargs):
+            calls[_name] = calls.get(_name,0)+1
+            return _original(*args,**kwargs)
+        monkeypatch.setattr(m242,name,observed)
+    assert m242.analyze(**paths) == expected
+    assert set(calls) == {'taxonomy_decision','eligibility','historical_inside','from_wkb','shape'}
+    before = dict(calls)
+    assert e.analyze(**paths) == expected
+    assert calls == before
+
+
+def test_policy_module_is_the_single_live_eligibility_owner(inputs, monkeypatch):
+    from experiments.overture_gold_contract import m242
+    paths = dict(historical_path=inputs/e.HIST,
+                 silver_path=inputs/e.SILVER_ROOT/'releases'/e.RELEASE/'current_state.parquet',
+                 source_path=inputs/e.SOURCE_DIR/'new.parquet',boundary_path=inputs/e.BOUNDARY)
+    monkeypatch.setattr(e.policy,'eligibility',lambda *args,**kwargs:(False,'FIXTURE_POLICY_HOLD'))
+    for analyze in (e.analyze,m242.analyze):
+        projected = analyze(**paths)[-1]
+        assert projected and all(not row['gold_eligible'] and row['eligibility_reason']=='FIXTURE_POLICY_HOLD' for row in projected)
 
 
 def seal(root):
@@ -19,14 +123,14 @@ def seal(root):
     manifest = e.read_json(silver / "manifest.json")
     for name in manifest["artifacts"]:
         table = pq.read_table(silver / name)
-        manifest["artifacts"][name] = {"sha256": e.m242.sha(silver / name),
+        manifest["artifacts"][name] = {"sha256": e.sha(silver / name),
                                        "rows": table.num_rows, "fields": table.schema.names}
     e.write_json(silver / "manifest.json", manifest)
     e.write_json(root / e.SILVER_ROOT / "current.json",
-                 {"release_id": e.RELEASE, "manifest_sha256": e.m242.sha(silver / "manifest.json")})
+                 {"release_id": e.RELEASE, "manifest_sha256": e.sha(silver / "manifest.json")})
     paths = [root / e.HIST, silver / "current_state.parquet", root / e.SOURCE_DIR / "new.parquet", root / e.BOUNDARY]
     e.write_json(root / e.REFERENCE, {"release": e.RELEASE,
-                  "inputs_sha256": {p.relative_to(root).as_posix(): e.m242.sha(p) for p in paths}})
+                  "inputs_sha256": {p.relative_to(root).as_posix(): e.sha(p) for p in paths}})
 
 
 @pytest.fixture
@@ -55,7 +159,7 @@ def inputs(tmp_path):
     pq.write_table(raw.slice(0, 2), root / e.HIST)
     scope = {"spatial_filter": "fixture polygon.covers"}
     e.write_json(source / "manifest.json", {"new_release": e.RELEASE, "filter_scope": scope,
-                 "output_sha256": {"new.parquet": e.m242.sha(source / "new.parquet")}})
+                 "output_sha256": {"new.parquet": e.sha(source / "new.parquet")}})
     normalized = e.consumer.make_silver({r["id"]: r for r in rows}, e.RELEASE, "bronze-fixture-hash", scope)
     pq.write_table(pa.Table.from_pylist(normalized), silver / "current_state.parquet")
     missing = pa.Table.from_pylist([{"source_id": "missing", "source_release": e.RELEASE,
@@ -64,10 +168,10 @@ def inputs(tmp_path):
     pq.write_table(missing, silver / "missing_or_out_of_scope.parquet")
     e.write_json(silver / "dq_metrics.json", {"fixture": True})
     e.write_json(silver / "manifest.json", {"release_id": e.RELEASE, "scope": scope,
-                 "source_manifest_sha256": e.m242.sha(source / "manifest.json"), "bronze_manifest_sha256": "bronze-fixture-hash",
-                 "ward_polygon_sha256": e.m242.sha(root / e.BOUNDARY),
-                 "ward_metadata_sha256": e.m242.sha(root / "config/admin_areas/phuong_khanh_hoi_metadata.json"),
-                 "dq_metrics_sha256": e.m242.sha(silver / "dq_metrics.json"), "metrics": {"fixture": True},
+                 "source_manifest_sha256": e.sha(source / "manifest.json"), "bronze_manifest_sha256": "bronze-fixture-hash",
+                 "ward_polygon_sha256": e.sha(root / e.BOUNDARY),
+                 "ward_metadata_sha256": e.sha(root / "config/admin_areas/phuong_khanh_hoi_metadata.json"),
+                 "dq_metrics_sha256": e.sha(silver / "dq_metrics.json"), "metrics": {"fixture": True},
                  "artifacts": {"current_state.parquet": {}, "missing_or_out_of_scope.parquet": {}}})
     seal(root)
     return root
@@ -77,10 +181,34 @@ def publish(inputs, output, **kwargs):
     return e.publish(inputs, output, expected_counts=COUNTS, **kwargs)
 
 
+def test_spatial_publication_pins_canonical_and_legacy_eligibility_without_collision(inputs, tmp_path, monkeypatch):
+    from experiments.overture_gold_contract import spatial_prededup
+    monkeypatch.setattr(e, 'BASELINE', COUNTS)
+    # Preserve the output-root guard inside the isolated fixture project.
+    monkeypatch.setattr(spatial_prededup, 'ROOT', tmp_path)
+    summary = spatial_prededup.run(inputs, tmp_path/'output/spatial')
+    hashes = summary['code_sha256']
+    wrapper = 'experiments/overture_gold_contract/eligibility.py'
+    assert hashes['eligibility.py'] == e.sha(Path(e.__file__))
+    assert hashes[wrapper] == e.sha(e.ROOT/wrapper)
+    assert hashes['eligibility_policy.py'] == e.sha(Path(e.policy.__file__))
+    assert hashes['eligibility.py'] != hashes[wrapper]
+    assert summary['counts'] == COUNTS
+
+
 def test_provisional_partition_and_byte_identical_rerun(inputs, tmp_path):
-    before = {str(p): e.m242.sha(p) for p in inputs.rglob("*") if p.is_file()}
+    before = {str(p): e.sha(p) for p in inputs.rglob("*") if p.is_file()}
     output = tmp_path / "published"
     path, manifest = publish(inputs, output)
+    assert {'src/fnb_platform/overture/__init__.py',
+            'src/fnb_platform/overture/comparison_run.py',
+            'src/fnb_platform/overture/comparison_publication.py',
+            'src/fnb_platform/overture/silver.py'} <= set(manifest['signature']['code_sha256'])
+    assert 'experiments/overture_silver/consumer.py' in manifest['signature']['code_sha256']
+    assert manifest['signature']['code_sha256']['src/fnb_platform/overture/eligibility.py'] == e.sha(Path(e.__file__))
+    assert manifest['signature']['code_sha256']['src/fnb_platform/overture/eligibility_policy.py'] == e.sha(Path(e.policy.__file__))
+    assert manifest['signature']['code_sha256']['src/fnb_platform/overture/snapshot.py'] == e.sha(e.ROOT/'src/fnb_platform/overture/snapshot.py')
+    assert 'experiments/overture_gold_contract/eligibility.py' in manifest['signature']['code_sha256']
     assert manifest["metrics"]["counts"] == COUNTS
     rows = pq.read_table(path / "candidates.parquet").to_pylist()
     assert {r["eligibility_basis"] for r in rows} == {"ORIGINAL_FILTER", "HIERARCHY_EXTENSION"}
@@ -88,10 +216,10 @@ def test_provisional_partition_and_byte_identical_rerun(inputs, tmp_path):
     assert all(r["address"] is None for r in rows)
     assert all(r["candidate_status"] == "PROVISIONAL" for r in rows)
     assert pq.read_table(path / "eligibility.parquet").num_rows == 4
-    old = {str(p): (e.m242.sha(p), p.stat().st_mtime_ns) for p in output.rglob("*") if p.is_file()}
+    old = {str(p): (e.sha(p), p.stat().st_mtime_ns) for p in output.rglob("*") if p.is_file()}
     assert publish(inputs, output)[0] == path
-    assert old == {str(p): (e.m242.sha(p), p.stat().st_mtime_ns) for p in output.rglob("*") if p.is_file()}
-    assert before == {str(p): e.m242.sha(p) for p in inputs.rglob("*") if p.is_file()}
+    assert old == {str(p): (e.sha(p), p.stat().st_mtime_ns) for p in output.rglob("*") if p.is_file()}
+    assert before == {str(p): e.sha(p) for p in inputs.rglob("*") if p.is_file()}
 
 
 @pytest.mark.parametrize("relative", [e.SOURCE_DIR / "new.parquet", e.HIST, e.BOUNDARY])
@@ -191,7 +319,7 @@ def test_exclusive_writer_and_read_only_root_guard(inputs, tmp_path):
 
 @pytest.mark.parametrize("status,expected", [(None, True), ("open", True), ("temporarily_closed", False), ("permanently_closed", False)])
 def test_existing_operating_status_policy_is_preserved(status, expected):
-    assert e.m242.eligibility(True, "INCLUDE_HIERARCHY_FNB", "NONE", status)[0] is expected
+    assert e.policy.eligibility(True, "INCLUDE_HIERARCHY_FNB", "NONE", status)[0] is expected
 
 
 @pytest.mark.parametrize("taxonomy,reason", [
@@ -201,7 +329,7 @@ def test_existing_operating_status_policy_is_preserved(status, expected):
     ({}, "REVIEW_MISSING_TAXONOMY"),
     ({"primary": "shop", "hierarchy": ["shop"]}, "EXCLUDE_NON_FNB_HIERARCHY")])
 def test_existing_taxonomy_rules_are_reused(taxonomy, reason):
-    assert e.m242.taxonomy_decision({"taxonomy": taxonomy}) == reason
+    assert e.policy.taxonomy_decision({"taxonomy": taxonomy}) == reason
 
 
 def publish_silver_fixture(inputs, monkeypatch, missing, complete):
@@ -260,7 +388,7 @@ def publish_silver_fixture(inputs, monkeypatch, missing, complete):
     # Pin the new fixture artifacts for the existing eligibility consumer.
     paths = [inputs / e.HIST, directory / "current_state.parquet", source / "new.parquet", inputs / e.BOUNDARY]
     e.write_json(inputs / e.REFERENCE, {"release": e.RELEASE,
-                 "inputs_sha256": {p.relative_to(inputs).as_posix(): e.m242.sha(p) for p in paths}})
+                 "inputs_sha256": {p.relative_to(inputs).as_posix(): e.sha(p) for p in paths}})
     return directory, manifest, source, publication
 
 
@@ -316,9 +444,9 @@ def test_historical_inferred_nulls_verify_without_rewriting(inputs):
     assert legacy.schema.field("dq_reasons").type == pa.list_(pa.null())
     pq.write_table(legacy, path)
     seal(inputs)
-    before = {p: (e.m242.sha(p), p.stat().st_mtime_ns) for p in directory.iterdir() if p.is_file()}
+    before = {p: (e.sha(p), p.stat().st_mtime_ns) for p in directory.iterdir() if p.is_file()}
     c.verify_silver(directory)
-    assert before == {p: (e.m242.sha(p), p.stat().st_mtime_ns) for p in before}
+    assert before == {p: (e.sha(p), p.stat().st_mtime_ns) for p in before}
 
 
 @pytest.mark.parametrize("case", ["wrong_id_type", "wrong_optional_type", "wrong_list_type", "missing_column", "legacy_columnless"])

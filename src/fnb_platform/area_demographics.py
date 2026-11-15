@@ -16,8 +16,8 @@ import uuid
 
 import pyarrow as pa
 
-from . import google_silver as silver
-from .gold_staging import publish_release, require
+from . import google_silver as silver, publication
+from .publication import require
 from .google_address_enrichment import norm
 from .overture_incremental import _digest
 
@@ -37,6 +37,11 @@ SCHEMA = pa.schema([(k, pa.string()) for k in [
 ]] + [('area_km2', pa.float64()), ('population', pa.int64()),
       ('population_density', pa.float64()), ('reference_year', pa.int32()),
       ('dq_flags', pa.list_(pa.string()))])
+
+
+def publish_release(output, signature, writer, *, guard=lambda:None, fault=lambda stage:None):
+    return publication.publish_release(output, signature, writer, guard=guard, fault=fault,
+        read_active=silver.read_active, verify_release=silver.verify_release, digest=_digest, dump=silver.dump)
 
 
 def read_json(path):
@@ -187,7 +192,7 @@ def publish_silver(snapshot_dir, output_root, *, codes_path=DEFAULT_CODES, refer
     if (snapshot_dir / 'manifest.json').exists(): paths.append(snapshot_dir / 'manifest.json')
     signature = dict(rule_version=VERSION, publication_kind='AREA_DEMOGRAPHICS_SILVER',
         inputs_sha256={str(p):silver.sha(p) for p in paths},
-        code_sha256={str(p.resolve()):silver.sha(p) for p in [Path(__file__),
+        code_sha256={str(p.resolve()):silver.sha(p) for p in [Path(__file__), Path(publication.__file__),
             ROOT / 'src/fnb_platform/google_address_enrichment.py', ROOT / 'src/fnb_platform/comparison_features.py']},
         reference_year=reference_year, population_basis=population_basis,
         runtime_versions={p:version(p) for p in ('pyarrow',)})

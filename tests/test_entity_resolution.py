@@ -126,9 +126,10 @@ def published_features(tmp_path):
     (release/'silver').mkdir(parents=True);(release/'reports').mkdir()
     artifacts={}
     for name, rows in [('silver/google_places.parquet',gg),('silver/source_links.parquet',li)]:
-        pq.write_table(pa.Table.from_pylist(rows),release/name)
+        table=pa.Table.from_pylist(rows,schema=silver.PLACE_SCHEMA if 'google_places' in name else silver.LINK_SCHEMA)
+        pq.write_table(table,release/name)
         from fnb_platform.overture_incremental import _digest
-        artifacts[name]={'sha256':silver.sha(release/name),'rows':len(rows),'logical_sha256':_digest(rows)}
+        artifacts[name]={'sha256':silver.sha(release/name),'rows':len(rows),'logical_sha256':_digest(table.to_pylist())}
     for name,value in [('reports/google_silver_dq_summary.json',json.dumps({'zero_candidate_inventory':[]})),
                        ('reports/google_silver_dq_details.csv','issue_code,overture_id,google_id_kind,google_identity_value,observation_ref,field,detail_json\n')]:
         (release/name).write_text(value,encoding='utf-8');artifacts[name]={'sha256':silver.sha(release/name)}
@@ -158,3 +159,79 @@ def test_publication_atomic_rerun_and_hash_mismatch(published_features,tmp_path)
 def test_existing_independent_decision_not_overwritten():
     ov,gg,li=fixture_rows();li[0]['er_status']='MATCH'
     with pytest.raises(ValueError,match='Independent ER'):run(ov,gg,li)
+
+
+@pytest.mark.parametrize('version', ['v1', 'v2', 'v3'])
+@pytest.mark.parametrize('google_present', [False, True])
+def test_zero_pairs_publish_with_manifest_provenance(tmp_path, version, google_present):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from fnb_platform import google_silver as s, comparison_features as cf, entity_resolution as er
+    from test_google_silver import make_run, metadata
+    source = tmp_path/'overture'/'state.parquet'
+    source.parent.mkdir()
+    ov, _, _ = fixture_rows()
+    pq.write_table(pa.Table.from_pylist(ov), source)
+    jobs = [dict(source='ov1', result=None, state='PENDING')]
+    raw = make_run(tmp_path, 'google-empty', jobs)
+    places_root = tmp_path/'places'
+    release, _ = s.publish([raw], source, places_root)
+    if google_present:
+        # A valid source observation without any Overture relationship.
+        from test_google_silver import reseal_artifact
+        place = dict(google_id_kind='data_id', google_identity_value='0x1:0x2',
+                     field_provenance_json='{}')
+        reseal_artifact(release, 'silver/google_places.parquet',
+                        pa.Table.from_pylist([place], schema=s.PLACE_SCHEMA))
+    comparison = tmp_path/'comparison'
+    cf.publish(source, places_root, comparison)
+    out = tmp_path/'er'
+    dest, summary = er.publish(comparison, out, version=version)
+    table = pq.ParquetFile(dest/'er_results.parquet').read()
+    assert table.num_rows == 0 and table.schema.equals(er.SCHEMA)
+    assert summary['rows'] == 0 and summary['zero_candidate_count'] == 1
+    assert summary['unchanged_zero_candidate_overture_ids'][0]['overture_id'] == 'ov1'
+    pointer = (out/'current.json').read_bytes()
+    checksums = {p: s.sha(p) for p in dest.rglob('*') if p.is_file()}
+    assert er.publish(comparison, out, version=version)[0] == dest
+    assert (out/'current.json').read_bytes() == pointer
+    assert checksums == {p: s.sha(p) for p in checksums}
+
+
+@pytest.mark.parametrize('reuse', [False, True])
+@pytest.mark.parametrize('changed_input', ['source', 'comparison_pointer'])
+def test_final_input_guard_preserves_active_release(published_features, tmp_path, reuse, changed_input):
+    from fnb_platform import entity_resolution as er, google_silver as s
+    comparison, source = published_features
+    out = tmp_path/'er'
+    prior, _ = er.publish(comparison, out)
+    previous_pointer = (out/'current.json').read_bytes()
+    prior_hashes = {p:s.sha(p) for p in prior.rglob('*') if p.is_file()}
+    if not reuse:
+        # A new pinned comparison snapshot selects a fresh ER destination,
+        # retaining the same source data and relationship evidence.
+        active = s.read_active(comparison)
+        manifest_path = active/'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['signature']['test_revision'] = 2
+        manifest_path.write_text(s.dump(manifest))
+        (comparison/'current.json').write_text(s.dump(dict(
+            release_id=active.name, manifest_sha256=s.sha(manifest_path))))
+    target = source if changed_input == 'source' else comparison/'current.json'
+    original = target.read_bytes()
+    def change(phase):
+        if phase == 'before_pointer_replace':
+            target.write_bytes(original + b' ')
+    with pytest.raises(ValueError, match='Input changed before pointer activation'):
+        er.publish(comparison, out, fault=change)
+    assert (out/'current.json').read_bytes() == previous_pointer
+    assert s.read_active(out) == prior
+    assert prior_hashes == {p:s.sha(p) for p in prior_hashes}
+    assert not (out/'.publish.lock').exists()
+    assert len(list((out/'releases').iterdir())) == (1 if reuse else 2)
+    target.write_bytes(original)
+    recovered, _ = er.publish(comparison, out)
+    pointer = (out/'current.json').read_bytes()
+    assert (recovered == prior) == reuse
+    assert er.publish(comparison, out)[0] == recovered
+    assert (out/'current.json').read_bytes() == pointer

@@ -20,19 +20,16 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from . import er_auto_accept as auto, google_silver as silver, human_decisions as human
+from . import er_auto_accept as auto, google_silver as silver, human_decisions as human, publication
+from .publication import check_hashes, require
 from .overture_incremental import _digest
 
 ACTIVE_VERSION = "er-effective-gold-staging-v1"
 STAGING_VERSION = "canonical-gold-staging-v1"
+REVIEWS_STAGING_VERSION = "canonical-gold-staging-reviews-v1"
 PROJECT = Path(__file__).resolve().parents[2] / "pipelines/gold_staging"
 ACCEPTED = {"AUTO_ACCEPTED", "HUMAN_ACCEPTED"}
 ACTIVE_SCHEMA = auto.SCHEMA.append(pa.field("activation_scope", pa.string())).append(pa.field("identity_verification_status", pa.string())).append(pa.field("activation_evidence_hash", pa.string()))
-
-
-def require(condition, message):
-    if not condition:
-        raise ValueError(message)
 
 
 def store_id(overture_id):
@@ -40,51 +37,11 @@ def store_id(overture_id):
     return "store_" + uuid.uuid5(uuid.NAMESPACE_URL, "fnb-platform/overture/" + overture_id).hex
 
 
-def check_hashes(hashes):
-    for path, expected in hashes.items():
-        require(silver.sha(path) == expected, "Pinned input/code changed: " + path)
-
-
 def publish_release(output, signature, writer, *, guard=lambda: None, fault=lambda stage: None):
-    """Reuse project release/checksum/lock conventions for complete staging artifacts."""
-    output = Path(output).resolve()
-    fingerprints = {**signature["inputs_sha256"], **signature["code_sha256"]}
-    require(all(not Path(p).resolve().is_relative_to(output) and not output.is_relative_to(Path(p).resolve().parent) for p in fingerprints), "Output overlaps an input directory")
-    rid = _digest(signature)[:24]
-    output.mkdir(parents=True, exist_ok=True)
-    with human.publication_lock(output):
-        current = silver.read_active(output)
-        if current:
-            require(silver.verify_release(current)["signature"]["rule_version"] == signature["rule_version"], "Different dataset at publication root")
-        dest = output / "releases" / rid
-        if not dest.exists():
-            stage = output / (".stage-" + uuid.uuid4().hex)
-            stage.mkdir()
-            tables, summary, extra = writer(stage, rid)
-            artifacts = {}
-            for name, table in tables.items():
-                pq.write_table(table, stage / name, compression="zstd")
-                artifacts[name] = dict(rows=table.num_rows, sha256=silver.sha(stage / name), logical_sha256=_digest(table.to_pylist()), schema=str(table.schema))
-            (stage / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-            for name in ["summary.json", *extra]:
-                require((stage / name).is_file(), "Incomplete staging artifact: " + name)
-                artifacts[name] = dict(sha256=silver.sha(stage / name))
-                if name.endswith('.parquet'):
-                    extra_table=pq.read_table(stage/name)
-                    artifacts[name].update(rows=extra_table.num_rows,logical_sha256=_digest(extra_table.to_pylist()),schema=str(extra_table.schema))
-            (stage / "manifest.json").write_text(silver.dump(dict(release_id=rid, signature=signature, artifacts=artifacts,
-                publication_kind=signature["publication_kind"], production_gold=False)), encoding="utf-8")
-            silver.verify_release(stage); fault("after_stage_validation")
-            check_hashes(fingerprints); guard()
-            dest.parent.mkdir(exist_ok=True); os.replace(stage, dest)
-            fault("after_release_rename")
-        else:
-            require(silver.verify_release(dest)["signature"] == signature, "Release signature mismatch")
-        fault("before_pointer_replace"); check_hashes(fingerprints); guard()
-        pointer = output / (".current-" + uuid.uuid4().hex)
-        pointer.write_text(silver.dump(dict(release_id=rid, manifest_sha256=silver.sha(dest / "manifest.json"))), encoding="utf-8")
-        os.replace(pointer, output / "current.json"); fault("after_pointer_replace")
-        return dest, json.loads((dest / "summary.json").read_text(encoding="utf-8"))
+    """Compatibility entrypoint; retain live domain verifier/lock bindings."""
+    return publication.publish_release(output, signature, writer, guard=guard, fault=fault,
+        read_active=silver.read_active, verify_release=silver.verify_release,
+        digest=_digest, dump=silver.dump, lock=human.publication_lock)
 
 
 def validation_sample(rows, category_rows, google_rows, *, size=48, seed=20261108, release_id):
@@ -163,8 +120,20 @@ def activate(shadow_root, output_root, *, size=48, seed=20261108, human_root=Non
         human_root, ai_path, ai_audit, root, find("er_auto_accept_policy_v1.json"))
     manifest = silver.verify_release(shadow); pins = dict(manifest["signature"]["inputs_sha256"])
     check_hashes(pins)
+    source_context = {}
+    for field, name in (("er_release_id", "er_results.parquet"),
+                        ("category_release_id", "category_audit.parquet"),
+                        ("google_silver_release_id", "google_places.parquet")):
+        artifact = find(name)
+        directory = artifact.parent.parent if name == "google_places.parquet" else artifact.parent
+        source_manifest = directory / "manifest.json"
+        require(pins.get(str(source_manifest.resolve())) == silver.sha(source_manifest),
+                "Unpinned activation source manifest: " + name)
+        source_context[field] = silver.verify_release(directory)["release_id"]
     table = pq.read_table(shadow / "effective_identity_mapping.parquet")
     source_rows = table.to_pylist(); category = pq.read_table(find("category_audit.parquet")).to_pylist()
+    require(all(all(row[f] == value for f, value in source_context.items()) for row in source_rows),
+            "Mapping/source release context mismatch")
     google = pq.read_table(find("google_places.parquet"), columns=["google_id_kind","google_identity_value","source_url"]).to_pylist()
     def writer(stage, rid):
         rows = []
@@ -179,13 +148,13 @@ def activate(shadow_root, output_root, *, size=48, seed=20261108, human_root=Non
             w=csv.DictWriter(stream,fieldnames=fields);w.writeheader();w.writerows(sample)
         summary=dict(activation_scope="GOLD_STAGING_ONLY", production_gold=False, source_shadow_release=shadow.name,
             statuses=current["effective_status_counts"], validation=sample_info,
-            no_google_candidate_ids=current["no_google_candidate_ids"], source_context={f:source_rows[0][f] for f in ("er_release_id","category_release_id","google_silver_release_id")})
+            no_google_candidate_ids=current["no_google_candidate_ids"], source_context=source_context)
         return {"effective_identity_mapping.parquet":pa.Table.from_pylist(rows,schema=ACTIVE_SCHEMA)}, summary, ["auto_accept_validation_sample.csv"]
     paths = [root/"current.json", shadow/"manifest.json",shadow/"effective_identity_mapping.parquet",*map(Path,pins)]
     hashes = {str(p.resolve()):silver.sha(p) for p in paths}
     hptr=human_root/"current.json"; hhash=manifest['signature']['human_pointer_sha256']
     signature=dict(rule_version=ACTIVE_VERSION, publication_kind="ACTIVE_EFFECTIVE_MAPPING_FOR_GOLD_STAGING", inputs_sha256=hashes,
-        code_sha256={str(Path(__file__).resolve()):silver.sha(__file__)}, source_shadow_release=shadow.name, sample_size=size, sample_seed=seed,
+        code_sha256={str(p.resolve()):silver.sha(p) for p in (Path(__file__), Path(publication.__file__))}, source_shadow_release=shadow.name, sample_size=size, sample_seed=seed,
         human_root=str(human_root),human_pointer_sha256=hhash)
     dest,summary=publish_release(output_root,signature,writer,guard=lambda:require((silver.sha(hptr) if hptr.exists() else None)==hhash,"Human state changed during activation"),fault=fault)
     # Reviewers edit a separate copy, not an immutable release artifact.
@@ -233,11 +202,65 @@ def pin_inputs(active_root, category_root):
     return paths,hashes,rows,guard_human
 
 
-def dbt_build(stage, paths, registry):
+def pin_reviews(reviews_root, google_path, *, release_id=None):
+    """Prepare immutable Reviews pins for a future attachment publisher."""
+    from . import google_reviews_silver as reviews
+    root, google_path = Path(reviews_root).resolve(), Path(google_path).resolve()
+    if release_id is None:
+        require((root / 'current.json').is_file(), 'Missing Reviews Silver pointer')
+        pointer_hash = silver.sha(root / 'current.json')
+        release = silver.read_active(root)
+    else:
+        require(isinstance(release_id, str) and len(release_id) == 24 and set(release_id) <= set('0123456789abcdef'),
+                'Invalid Reviews Silver release ID')
+        release = root / 'releases' / release_id
+    require(release is not None and (release / 'manifest.json').is_file(), 'Missing Reviews Silver manifest')
+    places_release = google_path.parent.parent
+    places_manifest = places_release / 'manifest.json'
+    gm = silver.verify_release(places_release)
+    require(gm['signature'].get('policy') == silver.POLICY
+            and google_path == places_release / 'silver/google_places.parquet', 'Invalid pinned Places contract')
+    place_rows = pq.read_table(google_path, columns=list(reviews.KEY)).to_pylist()
+    keys = {tuple(row[k] for k in reviews.KEY) for row in place_rows}
+    require(len(keys) == len(place_rows) and all(silver.typed_id(k[1]) == k for k in keys),
+            'Invalid/duplicate pinned Places identities')
+    rm = reviews.verify_release(release, keys)
+    inputs = rm['signature']['inputs_sha256']
+    lineage = []
+    for path in inputs:
+        if Path(path).name == 'manifest.json':
+            source = json.loads(Path(path).read_text(encoding='utf-8'))
+            if source.get('signature', {}).get('policy') == silver.POLICY:
+                lineage.append(Path(path).resolve())
+    require(len(lineage) == 1, 'Missing/ambiguous Reviews Places lineage')
+    source_manifest = lineage[0]
+    source = silver.verify_release(source_manifest.parent)
+    require(rm['signature'].get('google_places_silver_release') == source.get('release_id') == gm.get('release_id')
+            and gm.get('release_id') is not None
+            and inputs[str(source_manifest)] == silver.sha(source_manifest) == silver.sha(places_manifest),
+            'Reviews/Gold Places lineage mismatch')
+    hashes = {**inputs, str(places_manifest): silver.sha(places_manifest), str(google_path): silver.sha(google_path),
+              str(release / 'manifest.json'): silver.sha(release / 'manifest.json')}
+    hashes.update({str(release / name): spec['sha256'] for name, spec in rm['artifacts'].items()})
+    if release_id is None: hashes[str(root / 'current.json')] = pointer_hash
+    def guard():
+        check_hashes(hashes)
+        if release_id is None:
+            require(silver.read_active(root) == release, 'Reviews Silver pointer/release mismatch')
+    guard()
+    paths = dict(reviews_current_path=release / 'silver_reviews_current.parquet')
+    context = dict(reviews_release_id=rm['release_id'], reviews_manifest_sha256=hashes[str(release / 'manifest.json')],
+                   google_places_silver_release=gm['release_id'], places_manifest_sha256=silver.sha(places_manifest))
+    return paths, hashes, context, guard
+
+
+def dbt_build(stage, paths, registry, *, reviews_context=None):
     registry_path=stage/"store_identity_registry.parquet";pq.write_table(registry,registry_path)
     variables={k:p.resolve().as_posix() for k,p in paths.items()}
     variables["store_registry_path"]=registry_path.resolve().as_posix()
     variables["input_refs_json"]=silver.dump({k:dict(path=p.resolve().as_posix(),sha256=silver.sha(p)) for k,p in paths.items()})
+    if reviews_context is not None:
+        variables.update(reviews_enabled=True, reviews_context_json=silver.dump(reviews_context))
     env=dict(os.environ,FNB_DBT_DATABASE=str((stage/"staging.duckdb").resolve()),DBT_SEND_ANONYMOUS_USAGE_STATS="false",DBT_PARTIAL_PARSE="false",PYTHONDONTWRITEBYTECODE="1")
     args=[sys.executable,"-B","-c","from dbt.cli.main import cli; cli()","build","--project-dir",str(PROJECT),"--profiles-dir",str(PROJECT),
         "--target-path",str((stage/"dbt-target").resolve()),"--log-path",str((stage/"dbt-logs").resolve()),"--vars",json.dumps(variables),"--no-use-colors"]
@@ -250,6 +273,9 @@ def dbt_build(stage, paths, registry):
     try:
         tables={name+".parquet":con.execute('select * from gold_staging.'+name+' order by '+order).to_arrow_table()
             for name,order in (("dim_store","store_id"),("store_source_mapping","source,source_id_kind,source_id"),("source_accounting","source,source_id_kind,source_id"),("link_accounting","overture_id,google_id_kind,google_identity_value"))}
+        if reviews_context is not None:
+            for name in ('review_attachment', 'unmatched_review_accounting'):
+                tables[name+'.parquet'] = con.execute('select * from gold_staging.'+name+' order by source,source_review_id').to_arrow_table()
     finally:con.close()
     return tables,dict(models=sum(r["unique_id"].startswith("model.") for r in results["results"]),tests=sum(r["unique_id"].startswith("test.") for r in results["results"]),failures=0)
 
@@ -263,6 +289,11 @@ def validate_staging(tables, registry, effective, google_ids):
     require(len({r["store_id"] for r in stores})==len(stores),"Duplicate canonical store ID")
     require(len(mapping)==len(anchors)+len(accepted) and all(r["store_id"] in anchors.values() for r in mapping),"Mapping coverage/referential integrity")
     require({r["source_id"] for r in mapping if r["source"]=="overture"}==set(anchors),"Lost Overture source IDs")
+    overture_mapping = [r for r in mapping if r['source'] == 'overture']
+    require(len(overture_mapping) == len(anchors)
+            and all(r['source_id_kind'] == 'overture_id' for r in overture_mapping)
+            and {r['source_id']:r['store_id'] for r in overture_mapping} == anchors,
+            'Overture source mapping anchor mismatch')
     assigned={(r["source_id_kind"],r["source_id"]):r["store_id"] for r in mapping if r["source"]=="google"}
     require(len(assigned)==len(accepted) and assigned=={auto.key(r)[1:]:anchors[r["overture_id"]] for r in accepted},"Unauthorized Google assignment/merge")
     require({(r["source_id_kind"],r["source_id"]) for r in accounting if r["source"]=="google"}==google_ids and len(accounting)==len(anchors)+len(google_ids),"Google/source accounting loss")
@@ -278,23 +309,94 @@ def validate_staging(tables, registry, effective, google_ids):
         category_validation_counts=dict(Counter(r["category_validation_status"] for r in stores)),production_gold=False)
 
 
-def stage_gold(active_root,category_root,output_root,*,fault=lambda stage:None):
+def validate_review_attachment(tables, current, effective, registry, *, reviews_context=None):
+    """Conserve authoritative Silver logical identities; never deduplicate them."""
+    key = lambda r:(r['source'], r['source_review_id'])
+    typed = lambda r:(r['google_id_kind'], r['google_identity_value'])
+    inputs = {key(r):r for r in current}
+    require(len(inputs) == len(current) and len({r['logical_review_id'] for r in current}) == len(current),
+            'Duplicate current logical review identity')
+    require(all(all(isinstance(v,str) and v for v in key(r)) and silver.typed_id(typed(r)[1]) == typed(r) for r in current),
+            'Invalid current review identity')
+    accepted = [r for r in effective if r['effective_status'] in ACCEPTED and not r['shadow_only']
+                and r['activation_scope'] == 'GOLD_STAGING_ONLY']
+    anchors = {r['overture_id']:r['store_id'] for r in registry.to_pylist()}
+    by_google = {typed(r):r for r in accepted}
+    require(len(by_google) == len(accepted) and len({r['overture_id'] for r in accepted}) == len(accepted),
+            'Conflicting/shared accepted review mapping')
+    require(all(r['overture_id'] in anchors for r in accepted), 'Accepted review anchor missing')
+    if tables is None: return
+    attached = tables['review_attachment.parquet'].to_pylist()
+    unmatched = tables['unmatched_review_accounting.parquet'].to_pylist()
+    combined = attached + unmatched
+    require(len({key(r) for r in combined}) == len(combined)
+            and {key(r) for r in combined} == set(inputs), 'Review conservation/fanout mismatch')
+    expected = {k for k,r in inputs.items() if typed(r) in by_google}
+    require({key(r) for r in attached} == expected, 'Review accepted partition mismatch')
+    for row in combined:
+        require(all(row.get(f) == v for f,v in inputs[key(row)].items()), 'Review identity/content/provenance changed')
+        if reviews_context is not None:
+            require(json.loads(row['gold_review_lineage_json']) == reviews_context, 'Review release lineage changed')
+    for row in attached:
+        mapping = by_google[typed(row)]
+        require(row['overture_id'] == mapping['overture_id'] and row['store_id'] == anchors[mapping['overture_id']]
+                and row['mapping_status'] == mapping['effective_status']
+                and row['mapping_evidence_hash'] == mapping['evidence_hash']
+                and row['mapping_decision_source'] == mapping['decision_source']
+                and row['mapping_policy_version'] == mapping['policy_version']
+                and row['mapping_provenance_json'] == mapping['source_provenance_json'], 'Review store/accepted mapping mismatch')
+    for row in unmatched:
+        evidence = [r for r in effective if typed(r) == typed(row)]
+        require(row.get('store_id') is None and row['unmatched_reason'] == ('NO_MAPPING' if not evidence else 'NO_ACCEPTED_MAPPING')
+                and sorted(row['mapping_statuses']) == sorted({r['effective_status'] for r in evidence}),
+                'Unmatched review evidence mismatch')
+        fields = ('overture_id','shadow_only','activation_scope','evidence_hash')
+        expected_evidence = [dict({f:r[f] for f in fields},status=r['effective_status'])
+                             for r in sorted(evidence,key=lambda r:(r['overture_id'],r['effective_status']))]
+        require(json.loads(row['mapping_evidence_json']) == expected_evidence, 'Unmatched review provenance mismatch')
+    return dict(current_logical_reviews=len(current), attached_reviews=len(attached), unmatched_reviews=len(unmatched))
+
+
+def stage_gold(active_root,category_root,output_root,*,reviews_root=None,reviews_release=None,fault=lambda stage:None):
+    require(reviews_release is None or reviews_root is not None, 'Reviews release requires --reviews-root')
     output=Path(output_root).resolve()
     for root in (active_root,category_root):
         root=Path(root).resolve();require(not output.is_relative_to(root) and not root.is_relative_to(output),"Separate staging/source roots required")
     paths,hashes,effective,guard=pin_inputs(active_root,category_root)
+    reviews_context = None
+    if reviews_root is not None:
+        review_paths, review_hashes, reviews_context, review_guard = pin_reviews(reviews_root, paths['google_path'], release_id=reviews_release)
+        paths = {**paths, **review_paths}
+        mapping_manifest = paths['effective_mapping_path'].parent / 'manifest.json'
+        reviews_context = dict(reviews_context,
+            effective_mapping_release_id=json.loads(mapping_manifest.read_text(encoding='utf-8'))['release_id'],
+            effective_mapping_manifest_sha256=hashes[str(mapping_manifest.resolve())])
+        require(all(p not in hashes or hashes[p] == digest for p,digest in review_hashes.items()), 'Inconsistent Reviews input pins')
+        hashes = {**hashes, **review_hashes}
+        mapping_guard = guard
+        def guard():
+            mapping_guard(); review_guard()
     norm=pq.read_table(paths["category_normalization_path"],columns=["source","source_id","baseline_fnb_candidate"]).to_pylist()
     ids=sorted(r["source_id"] for r in norm if r["source"]=="overture" and r["baseline_fnb_candidate"])
     require(len(set(ids))==len(ids),"Duplicate candidate ID")
     registry=pa.Table.from_pylist([dict(overture_id=k,store_id=store_id(k)) for k in ids],schema=pa.schema([("overture_id",pa.string()),("store_id",pa.string())]))
+    if reviews_context is not None:
+        current = pq.ParquetFile(paths['reviews_current_path']).read().to_pylist()
+        validate_review_attachment(None,current,effective,registry)
     google_ids={(r["google_id_kind"],r["google_identity_value"]) for r in pq.read_table(paths["google_path"],columns=["google_id_kind","google_identity_value"]).to_pylist()}
     project_files=[p for p in PROJECT.rglob("*") if p.is_file() and p.suffix in {"sql","yml"}]
-    code={str(p.resolve()):silver.sha(p) for p in [Path(__file__),*project_files]}
+    code={str(p.resolve()):silver.sha(p) for p in [Path(__file__),Path(publication.__file__),*project_files]}
     signature=dict(rule_version=STAGING_VERSION,publication_kind="CANONICAL_GOLD_STAGING_NOT_PRODUCTION",inputs_sha256=hashes,code_sha256=code,
         runtime_versions={p:version(p) for p in ("dbt-core","dbt-duckdb","duckdb","pyarrow")},registry_logical_sha256=_digest(registry.to_pylist()))
+    if reviews_context is not None:
+        from . import google_reviews_silver as reviews
+        signature.update(rule_version=REVIEWS_STAGING_VERSION, reviews_context=reviews_context)
+        signature['code_sha256'][str(Path(reviews.__file__).resolve())] = silver.sha(reviews.__file__)
     def writer(stage,rid):
-        tables,dbt=dbt_build(stage,paths,registry)
+        tables,dbt=dbt_build(stage,paths,registry, reviews_context=reviews_context) if reviews_context is not None else dbt_build(stage,paths,registry)
         metrics=validate_staging(tables,registry,effective,google_ids)
+        if reviews_context is not None:
+            metrics.update(validate_review_attachment(tables,current,effective,registry,reviews_context=reviews_context))
         summary=dict(metrics,dbt_build=dbt,release_id=rid,identity_grain="One Overture source anchor, not a verified physical-store count",
             blockers=["The 48-link validation sample is unlabelled; precision is not yet estimated.","Unresolved links and source-only records remain unverified.","ER-B and human resolution of shared Google identities remain deferred.","Category disagreement/missing evidence remains PENDING; no category is independently verified.","Production Gold publication is not enabled."])
         return tables,summary,["store_identity_registry.parquet","staging.duckdb","dbt_console.log","dbt-target/run_results.json","dbt-target/manifest.json"]
@@ -308,9 +410,11 @@ def main():
     a.add_argument('--human-root',type=Path,default=Path('output/human-decisions-v1'))
     a.add_argument('--validation-root',type=Path,default=Path('output/human-review/auto-accept-v1-validation'))
     b=sub.add_parser("build");b.add_argument("--active-root",type=Path,required=True);b.add_argument("--category-root",type=Path,required=True);b.add_argument("--output-root",type=Path,required=True)
+    b.add_argument('--reviews-root', type=Path)
+    b.add_argument('--reviews-release')
     args=parser.parse_args()
     if args.command=="activate":path,summary=activate(args.shadow_root,args.output_root,size=args.sample_size,seed=args.sample_seed,human_root=args.human_root,validation_root=args.validation_root)
-    else:path,summary=stage_gold(args.active_root,args.category_root,args.output_root)
+    else:path,summary=stage_gold(args.active_root,args.category_root,args.output_root,reviews_root=args.reviews_root,reviews_release=args.reviews_release)
     print(silver.dump(dict(release=str(path),summary=summary)))
 
 

@@ -17,9 +17,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from shapely.geometry import Point
 
-from experiments.overture_silver import consumer
-from . import area_demographics as demo, google_silver as silver
-from .gold_staging import check_hashes, publish_release, require
+from .overture import silver as consumer
+from . import area_demographics as demo, google_silver as silver, publication
+from .publication import check_hashes, require
 from .google_address_enrichment import norm, parse_google_address
 from .overture_incremental import _digest
 
@@ -36,6 +36,11 @@ ASSIGNMENT_SCHEMA = pa.schema([(k, pa.string()) for k in [
     'boundary_version', 'reference_version', 'provenance_json', 'rule_version'
 ]] + [('latitude', pa.float64()), ('longitude', pa.float64()), ('boundary_distance_m', pa.float64()),
       ('near_boundary', pa.bool_()), ('flags', pa.list_(pa.string()))])
+
+
+def publish_release(output, signature, writer, *, guard=lambda:None, fault=lambda stage:None):
+    return publication.publish_release(output, signature, writer, guard=guard, fault=fault,
+        read_active=silver.read_active, verify_release=silver.verify_release, digest=_digest, dump=silver.dump)
 
 
 def label(value):
@@ -180,13 +185,43 @@ def pin_inputs(reference_root, catalog_root):
     # Pin the actual Overture/Google/Category/Effective inputs of this catalog, not guesses at latest paths.
     check_hashes(cm['signature']['inputs_sha256'])
     check_hashes(rm['signature']['inputs_sha256'])
+    catalog_pins = cm['signature']['inputs_sha256']
+    mappings = [Path(p) for p in catalog_pins if Path(p).name == 'effective_identity_mapping.parquet']
+    require(len(mappings) == 1, 'Missing/ambiguous catalog active mapping lineage')
+    mapping = mappings[0]
+    manifest_path = mapping.parent / 'manifest.json'
+    require(catalog_pins.get(str(manifest_path.resolve())) == silver.sha(manifest_path),
+            'Unpinned catalog active mapping manifest')
+    active = silver.verify_release(mapping.parent)
+    require(active.get('publication_kind') == 'ACTIVE_EFFECTIVE_MAPPING_FOR_GOLD_STAGING',
+            'Expected active Gold mapping lineage')
+    policy = active['signature']
+    human_root = policy.get('human_root')
+    require(isinstance(human_root, str) and bool(human_root) and Path(human_root).is_absolute()
+            and 'human_pointer_sha256' in policy, 'Missing/invalid pinned human state')
+    expected = policy['human_pointer_sha256']
+    require(expected is None or isinstance(expected, str) and re.fullmatch(r'[0-9a-f]{64}', expected),
+            'Invalid pinned human pointer checksum')
+    human_pointer = Path(human_root) / 'current.json'
+    def guard_human():
+        present = human_pointer.exists() or human_pointer.is_symlink()
+        require(not present or human_pointer.is_file(), 'Invalid human pointer: expected a file')
+        require((silver.sha(human_pointer) if present else None) == expected,
+                'Human decisions changed; reactivate mapping and rebuild catalog before area enrichment')
+        if expected is not None:
+            try:
+                silver.read_active(human_root)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise ValueError('Invalid human pointer or release') from exc
+    guard_human()
     paths = dict(reference_path=reference / 'area_demographics.parquet', catalog_path=catalog / 'dim_store.parquet')
     hashes = {**rm['signature']['inputs_sha256'], **cm['signature']['inputs_sha256']}
     for root, release in zip(roots, releases):
         for p in [root / 'current.json', release / 'manifest.json']:
             hashes[str(p)] = silver.sha(p)
     for p in [*paths.values(), BOUNDARY, BOUNDARY_META]: hashes[str(p)] = silver.sha(p)
-    return paths, hashes, dict(reference_release=reference.name, catalog_release=catalog.name)
+    return paths, hashes, dict(reference_release=reference.name, catalog_release=catalog.name,
+                              human_state=dict(pointer=str(human_pointer), sha256=expected)), guard_human
 
 
 def dbt_build(stage, paths):
@@ -214,7 +249,7 @@ def dbt_build(stage, paths):
 
 
 def build(reference_root, catalog_root, output_root, *, near_boundary_m=10.0, fault=lambda stage:None):
-    paths, hashes, refs = pin_inputs(reference_root, catalog_root)
+    paths, hashes, refs, guard_human = pin_inputs(reference_root, catalog_root)
     metadata = demo.read_json(BOUNDARY_META)
     polygon = consumer.load_ward()
     require(consumer.WARD_PATH.resolve() == BOUNDARY and consumer.WARD_METADATA.resolve() == BOUNDARY_META,
@@ -225,10 +260,11 @@ def build(reference_root, catalog_root, output_root, *, near_boundary_m=10.0, fa
     reference = pq.read_table(paths['reference_path']).to_pylist()
     require(any(r['ward_code'] == metadata['official_unit_code'] and r['legal_code_status'] == 'CODE_AND_NAME_AGREE'
                 for r in reference), 'Supported polygon administrative code not validated against official reference')
-    code_paths = [Path(__file__), Path(demo.__file__), Path(consumer.__file__),
+    code_paths = [Path(__file__), Path(demo.__file__), Path(consumer.__file__), Path(publication.__file__),
                   ROOT / 'src/fnb_platform/google_address_enrichment.py', ROOT / 'src/fnb_platform/comparison_features.py',
                   *sorted(p for p in PROJECT.rglob('*') if p.is_file() and p.suffix in {'.sql', '.yml'})]
     signature = dict(rule_version=VERSION, publication_kind='AREA_ENRICHMENT_GOLD_STAGING_NOT_PRODUCTION',
+        human_state=refs['human_state'],
         inputs_sha256=hashes, code_sha256={str(p.resolve()):silver.sha(p) for p in code_paths},
         near_boundary_m=near_boundary_m,
         runtime_versions={package:version(package)
@@ -262,7 +298,7 @@ def build(reference_root, catalog_root, output_root, *, near_boundary_m=10.0, fa
         (stage / 'dq_summary.json').write_text(silver.dump(summary), encoding='utf-8')
         return tables, summary, ['ward_assignment.parquet', 'dq_summary.json', 'area_catalog.duckdb',
                                 'dbt_console.log', 'dbt-target/run_results.json', 'dbt-target/manifest.json']
-    return publish_release(output_root, signature, writer, fault=fault)
+    return publish_release(output_root, signature, writer, guard=guard_human, fault=fault)
 
 
 def main():

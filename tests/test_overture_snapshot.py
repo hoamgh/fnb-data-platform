@@ -7,13 +7,125 @@ import pyarrow.parquet as pq
 import pytest
 from shapely.geometry import Point
 
-from experiments.overture_incremental import run
+from fnb_platform.overture import comparison_run as run
 from fnb_platform.overture_incremental import compare_releases
 from fnb_platform.overture_snapshot import validate_snapshot, validate_pair_scope
 
 
+def test_incremental_legacy_imports_share_canonical_modules(monkeypatch):
+    import importlib
+    from fnb_platform.overture import comparison_publication
+    from fnb_platform.overture import silver as consumer
+    from pathlib import Path
+    assert importlib.import_module('experiments.overture_incremental.run') is run
+    assert importlib.import_module('experiments.overture_incremental.publish') is comparison_publication
+    assert consumer.bronze is comparison_publication
+    assert consumer.checksum is run.checksum
+    assert run.ROOT == Path(__file__).resolve().parents[1]
+    # Historical import callers and canonical execution must share globals.
+    legacy = importlib.import_module('experiments.overture_incremental.run')
+    monkeypatch.setattr(legacy, 'OLD', run.ROOT/'fixture-not-a-dataset')
+    assert run.main.__globals__['OLD'] == legacy.OLD
+
+
+@pytest.mark.parametrize('script', ['experiments/overture_incremental/run.py',
+                                  'experiments/overture_incremental/publish.py',
+                                  'experiments/overture_silver/consumer.py'])
+def test_historical_overture_cli_help(script):
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+    root = Path(__file__).resolve().parents[1]
+    # Prove old script bootstrap works without inheriting a repository PYTHONPATH.
+    env = dict(os.environ)
+    env.pop('PYTHONPATH', None)
+    result = subprocess.run([sys.executable,'-B',str(root/script),'--help'],cwd=root,
+                            env=env,capture_output=True,text=True,timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert 'usage:' in result.stdout
+
+
+@pytest.mark.parametrize('filename', ['comparison_run.py', 'silver.py', 'snapshot.py'])
+def test_campaign_fingerprint_covers_canonical_incremental_code(monkeypatch, filename):
+    from pathlib import Path
+    from scripts import google_m2_batch as batch
+    before = batch.campaign_code_fingerprints()
+    names = {name.replace('\\','/') for name in before}
+    expected = {'src/fnb_platform/overture/__init__.py',
+                'src/fnb_platform/overture/comparison_run.py',
+                'src/fnb_platform/overture/comparison_publication.py',
+                'src/fnb_platform/overture/silver.py',
+                'src/fnb_platform/overture/snapshot.py'}
+    assert expected <= names
+    assert 'experiments/overture_silver/consumer.py' in names
+    target = batch.ROOT/'src/fnb_platform/overture'/filename
+    checksum = batch.e.sha
+    monkeypatch.setattr(batch.e, 'sha', lambda p:
+        hashlib.sha256(Path(p).read_bytes()+b'\n# simulated change').hexdigest()
+        if Path(p) == target else checksum(p))
+    after = batch.campaign_code_fingerprints()
+    assert [name.replace('\\','/') for name in before if before[name] != after[name]] == [target.relative_to(batch.ROOT).as_posix()]
+
+
 def write_json(path, value):
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+@pytest.mark.parametrize('phase', ['before_write','after_stage','after_rename','after_pointer'])
+def test_canonical_silver_fault_boundaries_and_pointer_recovery(snapshots, tmp_path, phase):
+    from fnb_platform.overture import silver, comparison_publication
+    bronze, output = tmp_path/'bronze', tmp_path/'silver'
+    source = tmp_path/'comparison'
+    run.main(source, **snapshots)
+    comparison_publication.publish(source, bronze)
+    prior, _ = silver.publish(source, bronze, output)
+    pointer = (output/'current.json').read_bytes()
+    protected = {p:digest(p) for p in prior.rglob('*') if p.is_file()}
+    metadata = json.loads(snapshots['new_metadata'].read_text())
+    metadata['source_release'] = '2026-11-18.0'
+    write_json(snapshots['new_metadata'], metadata)
+    next_source = tmp_path/'next-comparison'
+    run.main(next_source, **snapshots)
+    comparison_publication.publish(next_source, bronze)
+    visited = []
+    def crash(current):
+        visited.append(current)
+        if current == phase:
+            raise RuntimeError('injected '+phase)
+    with pytest.raises(RuntimeError, match='injected '+phase):
+        silver.publish(next_source, bronze, output, fault=crash)
+    assert phase in visited and not (output/'.publication.lock').exists()
+    active, _ = silver.read_silver_active(output)
+    # after_pointer reports an error after commitment, as in the old publisher.
+    assert active.name == ('2026-11-18.0' if phase == 'after_pointer' else prior.name)
+    if phase != 'after_pointer':
+        assert (output/'current.json').read_bytes() == pointer
+    assert all(digest(p) == h for p,h in protected.items())
+    recovered, _ = silver.publish(next_source, bronze, output)
+    before = {p:digest(p) for p in output.rglob('*') if p.is_file()}
+    assert silver.publish(next_source, bronze, output)[0] == recovered
+    assert recovered.name == '2026-11-18.0'
+    assert all(digest(p) == h for p,h in before.items())
+
+
+def test_silver_legacy_import_shares_canonical_module_and_paths(monkeypatch):
+    import importlib
+    from pathlib import Path
+    from fnb_platform.overture import silver
+    from fnb_platform import area_enrichment
+    from experiments.overture_gold_contract import eligibility
+    legacy = importlib.import_module('experiments.overture_silver.consumer')
+    assert legacy is silver and eligibility.consumer is silver
+    assert area_enrichment.consumer is silver
+    root = Path(__file__).resolve().parents[1]
+    assert Path(silver.__file__).resolve() == root/'src/fnb_platform/overture/silver.py'
+    assert silver.ROOT == root
+    assert silver.WARD_PATH == root/'config/admin_areas/phuong_khanh_hoi.geojson'
+    assert silver.WARD_METADATA == root/'config/admin_areas/phuong_khanh_hoi_metadata.json'
+    monkeypatch.setattr(legacy, 'WARD_PATH', root/'fixture-ward-not-a-dataset')
+    assert silver.load_ward.__globals__['WARD_PATH'] == legacy.WARD_PATH
+    assert legacy.SilverError is silver.SilverError
 
 
 def digest(path):
@@ -78,7 +190,7 @@ def test_nullable_values_with_declared_types_remain_compatible(snapshots, tmp_pa
 
 
 def test_pinned_boundary_preserves_covers_edge_and_buffer(snapshots):
-    from experiments.overture_silver import consumer as c
+    from fnb_platform.overture import silver as c
     polygon = run.boundary_polygon(snapshots['ward_path'].read_bytes())
     template = pq.read_table(snapshots['new_path']).to_pylist()[0]
     points = [Point(106.7, 10.755), Point(106.699, 10.758), Point(106.704, 10.758)]
@@ -91,7 +203,7 @@ def test_pinned_boundary_preserves_covers_edge_and_buffer(snapshots):
 
 @pytest.mark.parametrize('legacy', [False, True])
 def test_boundary_pinned_through_silver_without_current_checkout(snapshots, tmp_path, monkeypatch, legacy):
-    from experiments.overture_silver import consumer as c
+    from fnb_platform.overture import silver as c
     source, publication, silver = (tmp_path/name for name in ('comparison', 'publication', 'silver'))
     boundary = snapshots['ward_path'].read_bytes()
     run.main(source, **snapshots)
@@ -121,7 +233,7 @@ def test_boundary_pinned_through_silver_without_current_checkout(snapshots, tmp_
 
 @pytest.mark.parametrize('failure', ['missing', 'corrupt', 'legacy_wrong', 'legacy_no_hash'])
 def test_unavailable_boundary_fails_before_silver_publication(snapshots, tmp_path, monkeypatch, failure):
-    from experiments.overture_silver import consumer as c
+    from fnb_platform.overture import silver as c
     source, publication, silver = (tmp_path/name for name in ('comparison', 'publication', 'silver'))
     run.main(source, **snapshots)
     if failure.startswith('legacy'):

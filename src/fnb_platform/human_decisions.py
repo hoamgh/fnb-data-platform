@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
-from contextlib import contextmanager
 import csv
 from datetime import datetime, timezone
 import json
@@ -15,7 +14,8 @@ import uuid
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from . import er_category_review_export as review, google_silver as silver
+from . import er_category_review_export as review, google_silver as silver, publication
+from .publication import publication_lock
 from .overture_incremental import _digest
 
 VERSION = "human-decision-import-v1"
@@ -235,33 +235,6 @@ def plan(data, history, identity_csv, category_csv, imported_at):
     return tables, summary
 
 
-@contextmanager
-def publication_lock(output):
-    """OS lock automatically released on process death; an old lock file is harmless."""
-    path = output / ".publish.lock"
-    with path.open("a+b") as stream:
-        if path.stat().st_size == 0:
-            stream.write(b"0"); stream.flush()
-        stream.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as error:
-            raise ValueError("Another human-decision publication is running") from error
-        try:
-            yield
-        finally:
-            stream.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-
-
 def read_history(output):
     active = silver.read_active(output)
     if active is None:
@@ -281,7 +254,7 @@ def run(er_root, category_root, identity_csv, category_csv, output_root, *, appl
         path = Path(path).resolve()
         require(not path.is_relative_to(output), "Decision output cannot contain input CSV")
         hashes[str(path)] = silver.sha(path)
-    code_paths = [Path(__file__), Path(review.__file__), Path(silver.__file__), Path(__file__).with_name("overture_incremental.py")]
+    code_paths = [Path(__file__), Path(review.__file__), Path(silver.__file__), Path(__file__).with_name("overture_incremental.py"), Path(publication.__file__)]
     code_hashes = {str(p.resolve()): silver.sha(p) for p in code_paths}
     def prepare():
         pointer = output / "current.json"

@@ -14,6 +14,32 @@ from fnb_platform.catalog import load_catalog
 from fnb_platform.overture_snapshot import validate_snapshot, validate_pair_scope
 
 
+def test_acquisition_and_snapshot_share_legacy_globals(monkeypatch):
+    from fnb_platform.overture import acquisition, snapshot, catalog
+    from fnb_platform import overture_snapshot
+    assert cli is acquisition
+    assert overture_snapshot is snapshot
+    assert acquisition.prepare_catalog is catalog.prepare_catalog
+    sentinel = lambda *args, **kwargs: None
+    monkeypatch.setattr(cli, 'validate_snapshot', sentinel)
+    assert acquisition.main.__globals__['validate_snapshot'] is sentinel
+    monkeypatch.setattr(overture_snapshot, 'BRONZE_STAGING_PREFIX', 'fixture-only')
+    assert snapshot.validate_snapshot.__globals__['BRONZE_STAGING_PREFIX'] == 'fixture-only'
+
+
+@pytest.mark.parametrize('module', ['fnb_platform.prepare_catalog',
+                                   'fnb_platform.overture.acquisition'])
+def test_catalog_old_new_cli_help(module):
+    import os
+    import subprocess
+    from pathlib import Path
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]/'src'))
+    result = subprocess.run([sys.executable, '-B', '-m', module, '--help'],
+                            env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert '--source-metadata' in result.stdout and '--bronze-dir' in result.stdout
+
+
 def inputs(tmp_path):
     ward=tmp_path/'ward.json'
     ward.write_text(json.dumps({'type':'Feature','properties':{

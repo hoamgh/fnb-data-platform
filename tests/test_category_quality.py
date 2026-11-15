@@ -241,8 +241,12 @@ def write_release(root, artifacts, signature):
     specs = {}
     for name, rows in artifacts.items():
         path = d / name; path.parent.mkdir(parents=True, exist_ok=True)
-        t = pa.Table.from_pylist(rows); pq.write_table(t, path)
-        specs[name] = dict(rows=len(rows), sha256=s.sha(path), logical_sha256=_digest(rows), schema=str(t.schema))
+        schema = {"silver/google_places.parquet": s.PLACE_SCHEMA,
+                  "silver/source_links.parquet": s.LINK_SCHEMA}.get(name)
+        t = pa.Table.from_pylist(rows, schema=schema); pq.write_table(t, path)
+        if schema is not None:
+            assert pq.ParquetFile(path).schema_arrow.equals(schema)
+        specs[name] = dict(rows=t.num_rows, sha256=s.sha(path), logical_sha256=_digest(t.to_pylist()), schema=str(t.schema))
     (d / "manifest.json").write_text(s.dump(dict(release_id=rid, signature=signature, artifacts=specs)), encoding="utf-8")
     (root / "current.json").write_text(s.dump(dict(release_id=rid, manifest_sha256=s.sha(d / "manifest.json"))), encoding="utf-8")
     return d
@@ -270,6 +274,9 @@ def publication_fixture(tmp_path, monkeypatch):
 def test_publication_rerun_atomic_failure_and_checksums(tmp_path, monkeypatch):
     args = publication_fixture(tmp_path, monkeypatch)
     dest, summary = c.publish(*args)
+    from fnb_platform.overture import eligibility_policy
+    policy_path = str(Path(eligibility_policy.__file__).resolve())
+    assert s.verify_release(dest)['signature']['code_sha256'][policy_path] == s.sha(policy_path)
     before = (args[3] / "current.json").read_bytes()
     dest2, summary2 = c.publish(*args)
     assert dest == dest2 and summary == summary2

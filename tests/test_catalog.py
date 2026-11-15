@@ -13,6 +13,20 @@ from fnb_platform import catalog as storage
 from fnb_platform.catalog import build_overture_catalog
 
 
+def test_overture_catalog_alias_identity_pickle_and_globals(monkeypatch):
+    import pickle
+    from pathlib import Path
+    from fnb_platform.overture import catalog
+    assert storage is catalog
+    assert storage.PlaceCatalog is catalog.PlaceCatalog
+    assert catalog.PlaceCatalog.__module__ == 'fnb_platform.catalog'
+    value = catalog.PlaceCatalog([], {}, {'canonical_persisted': 0})
+    assert pickle.loads(pickle.dumps(value)) == value
+    assert catalog.ROOT == Path(__file__).resolve().parents[1]
+    monkeypatch.setattr(storage, 'SCHEMA_VERSION', 999)
+    assert catalog._read_catalog.__globals__['SCHEMA_VERSION'] == 999
+
+
 def record(category="vietnamese_restaurant", source_id="one", xy=(1, 1)):
     return {
         "id": source_id, "names": {"primary": "Example"},

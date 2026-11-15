@@ -47,8 +47,8 @@ def job(root, number, google_id, rows):
     writer=ParquetReviewWriter(path/'lake','same-second','2026-11-06')
     writer.write_batch([(_digest([number,i,row]),row) for i,row in enumerate(rows)])
     with sqlite3.connect(path/'reviews.sqlite3') as db:
-        db.executescript('create table pending_review_events(event_id text); create table review_state(id text);')
-        db.executemany('insert into review_state values(?)',[(row['source_review_id'],) for row in rows])
+        db.executescript('create table pending_review_events(event_id text); create table review_state(source text, source_review_id text, unique(source, source_review_id));')
+        db.executemany('insert or ignore into review_state values(?,?)',[(row['source'],row['source_review_id']) for row in rows])
     return path,result
 
 
@@ -65,7 +65,7 @@ def fixture(tmp_path, *, modify=None, legacy=False):
     with sqlite3.connect(root/'dispatch.sqlite3') as db:db.execute('create table dispatch(id integer)')
     if modify: modify(root)
     release=base/'places/releases'/('a'*24);release.mkdir(parents=True)
-    places=pa.Table.from_pylist([dict(google_id_kind='data_id',google_identity_value=f'0x{i}:0x{i}',review_count=20) for i in (1,2,3)])
+    places=pa.Table.from_pylist([dict(google_id_kind='data_id',google_identity_value=f'0x{i}:0x{i}',review_count=20) for i in (1,2,3)], schema=s.PLACE_SCHEMA)
     pq.write_table(places,release/'places.parquet')
     write_json(release/'reports/google_silver_dq_summary.json',dict(input_runs=[{'root':str(root.resolve())}]))
     (release/'silver').mkdir();(release/'places.parquet').rename(release/'silver/google_places.parquet')
@@ -116,6 +116,8 @@ def test_cross_google_review_conflict_quarantined_without_reassignment(tmp_path)
         path=next((root/'worker-01/job-03').glob('lake/**/*.parquet'))
         table=pq.ParquetFile(path).read();data=table.to_pylist();data[0]['source_review_id']='r1'
         pq.write_table(pa.Table.from_pylist(data,schema=table.schema),path)
+        with sqlite3.connect(root/'worker-01/job-03/reviews.sqlite3') as db:
+            db.execute("update review_state set source_review_id='r1'")
     google,_=fixture(tmp_path,modify=modify)
     tables,summary=run_transform(google)
     assert summary['cross_identity_review_conflicts']==1 and summary['quarantined_observations']==3
@@ -168,7 +170,12 @@ def test_invalid_review_bindings_and_content_are_kept_but_quarantined(tmp_path,c
         path=next((root/'worker-01/job-01').glob('lake/**/*.parquet'));table=pq.ParquetFile(path).read();rows=table.to_pylist()
         rows[0][{'store':'store_id','id':'source_review_id','hash':'review_text'}[change]]=None if change=='id' else 'changed'
         pq.write_table(pa.Table.from_pylist(rows,schema=table.schema),path)
-    google,_=fixture(tmp_path,modify=modify);tables,summary=run_transform(google)
+    google,_=fixture(tmp_path,modify=modify)
+    if change=='id':
+        with pytest.raises(ValueError, match='Missing persisted review identity coverage'):
+            run_transform(google)
+        return
+    tables,summary=run_transform(google)
     assert summary['observation_count']==4 and summary['quarantined_observations']>=1
     assert any(flag in row['dq_flags'] and not row['current_eligible'] for row in tables['silver_review_observations.parquet'].to_pylist())
 
@@ -252,3 +259,129 @@ def test_source_membership_change_during_publication_does_not_activate(tmp_path)
             path=next((root/'worker-01/job-02').glob('lake/**/*.parquet'));path.with_name('late.parquet').write_bytes(path.read_bytes())
     with pytest.raises(ValueError,match='Source file inventory changed'):r.publish(google,out,fault=fault)
     assert not (out/'current.json').exists()
+
+
+@pytest.mark.parametrize('damage', ['one_file', 'all_files', 'different_identity', 'other_job', 'state_only'])
+def test_missing_persisted_identity_blocks_active_publish(tmp_path, damage):
+    google, root = fixture(tmp_path)
+    out = tmp_path/'derived'
+    active, _ = r.publish(google, out)
+    pointer = (out/'current.json').read_bytes()
+    job_path = root/'worker-01/job-01'
+    files = sorted(job_path.glob('lake/**/*.parquet'))
+    # Simulate missing files by changing the bounded test inventory, without
+    # deleting or moving any files (including temporary fixtures).
+    if damage in {'one_file', 'all_files', 'state_only'}:
+        pass
+    else:
+        table = pq.ParquetFile(files[0]).read()
+        rows = table.to_pylist()
+        rows[0]['source_review_id'] = 'replacement' if damage == 'different_identity' else 'r3'
+        pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), files[0])
+    snapshots = {p: s.sha(p) for p in r.capture_files([root.resolve()])}
+    original_glob = Path.glob
+    def glob(path, pattern):
+        found = original_glob(path, pattern)
+        if pattern == 'lake/**/*.parquet' and damage in {'one_file', 'all_files', 'state_only'}:
+            return (p for p in found if not (
+                (damage == 'one_file' and p == files[0]) or
+                (damage == 'state_only' and path == job_path) or damage == 'all_files'))
+        return found
+    from unittest.mock import patch
+    with patch.object(Path, 'glob', glob):
+        with pytest.raises(ValueError, match='Missing persisted review identity coverage'):
+            r.publish(google, out)
+    assert (out/'current.json').read_bytes() == pointer and s.read_active(out) == active
+    assert snapshots == {p: s.sha(p) for p in snapshots}
+
+
+def test_multiple_updates_and_empty_pending_state_are_supported(tmp_path):
+    google, root = fixture(tmp_path)
+    path = root/'worker-01/job-01'
+    writer = ParquetReviewWriter(path/'lake', 'same-second', '2026-11-06')
+    updates = [event(text=f'update {i}', change_type='UPDATE') for i in range(2)]
+    writer.write_batch([(_digest(['update', i]), row) for i, row in enumerate(updates)])
+    _, summary = r.publish(google, tmp_path/'derived')
+    assert summary['sqlite_state_rows'] == 4
+    assert summary['persisted_event_count'] == 6
+    assert summary['unique_logical_review_count'] == 3
+
+
+def test_unsupported_state_schema_blocks_publication(tmp_path):
+    google, root = fixture(tmp_path)
+    with sqlite3.connect(root/'worker-01/job-01/reviews.sqlite3') as db:
+        db.execute('alter table review_state rename column source to legacy_source')
+    out = tmp_path/'derived'
+    with pytest.raises(ValueError, match='Unsupported review_state identity schema'):
+        r.publish(google, out)
+    assert not (out/'current.json').exists()
+
+
+@pytest.mark.parametrize('changes,flag', [
+    ({'observed_at': 'invalid'}, 'OBSERVED_AT_MISSING_OR_INVALID'),
+    ({'observed_at': None}, 'OBSERVED_AT_MISSING_OR_INVALID'),
+    ({'change_type': 'UNKNOWN'}, 'EVENT_TYPE_UNRECOGNIZED'),
+    ({'last_modified_at': datetime(2026, 11, 8, tzinfo=timezone.utc)}, 'REVIEW_TIMESTAMP_AFTER_OBSERVATION'),
+])
+def test_record_dq_quarantines_only_observation_preserving_evidence(tmp_path, changes, flag):
+    def modify(root):
+        path = next((root/'worker-01/job-01').glob('lake/**/*.parquet'))
+        table = pq.ParquetFile(path).read(); rows = table.to_pylist()
+        rows[1].update(changes)  # r2 has exactly one persisted observation.
+        pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
+    google, _ = fixture(tmp_path, modify=modify)
+    out = tmp_path/'derived'
+    release, summary = r.publish(google, out)
+    observations = pq.read_table(release/'silver_review_observations.parquet').to_pylist()
+    current = pq.read_table(release/'silver_reviews_current.parquet').to_pylist()
+    row = next(x for x in observations if x['source_review_id'] == 'r2')
+    assert not row['current_eligible']
+    assert set(row['dq_flags']) == {flag, 'REVIEW_TEXT_MISSING_OR_EMPTY'}
+    assert row['file_provenance_json'] and row['provenance_json'] and row['source_event_id']
+    for key, value in changes.items():
+        preserved = {'observed_at': 'observed_at_raw', 'change_type': 'event_type_original',
+                     'last_modified_at': 'last_modified_at_raw'}[key]
+        assert row[preserved] == r.raw_time(value)
+    if flag == 'REVIEW_TIMESTAMP_AFTER_OBSERVATION':
+        assert row['timestamp_status'] == 'VERIFIED'
+        assert row['last_modified_at'] > row['observed_at']
+    assert len(observations) == 4 and len(current) == 2
+    assert all(x['source_review_id'] != 'r2' for x in current)
+    assert summary['quarantined_observations'] == 1
+    assert summary['observation_dq_flag_counts'][flag] == 1
+    assert summary['hard_failures'] == 0 and summary['silver_readiness'] == 'NOT_READY'
+    pointer = (out/'current.json').read_bytes()
+    checksums = {p: s.sha(p) for p in release.rglob('*') if p.is_file()}
+    assert r.publish(google, out)[0] == release
+    assert (out/'current.json').read_bytes() == pointer
+    assert checksums == {p: s.sha(p) for p in checksums}
+
+
+@pytest.mark.parametrize('all_invalid', [False, True])
+def test_current_selects_only_valid_versions_and_keeps_all_observations(tmp_path, all_invalid):
+    def modify(root):
+        for job_path in root.glob('worker-*/job-*'):
+            path = next(job_path.glob('lake/**/*.parquet'))
+            table = pq.ParquetFile(path).read(); rows = table.to_pylist()
+            for row in rows:
+                if all_invalid or job_path.name == 'job-02':
+                    row['change_type'] = 'UNKNOWN'
+            pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
+    google, _ = fixture(tmp_path, modify=modify)
+    tables, summary = run_transform(google)
+    observations = tables['silver_review_observations.parquet'].to_pylist()
+    current = tables['silver_reviews_current.parquet'].to_pylist()
+    assert len(observations) == 4
+    assert summary['quarantined_observations'] == (4 if all_invalid else 1)
+    assert summary['observation_dq_flag_counts']['EVENT_TYPE_UNRECOGNIZED'] == (4 if all_invalid else 1)
+    assert summary['hard_failures'] == 0
+    assert all(x['file_provenance_json'] and x['provenance_json'] for x in observations)
+    if all_invalid:
+        assert not current and all(not x['current_eligible'] for x in observations)
+    else:
+        by_id = {x['source_review_id']: x for x in current}
+        assert by_id['r1']['review_text'] == 'Fixture review'
+        assert by_id['r2']['review_text'] is None and by_id['r2']['rating'] == 4
+        assert len(current) == 3
+        assert all(next(o for o in observations if o['observation_id'] == x['current_observation_id'])['current_eligible']
+                   for x in current)

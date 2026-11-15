@@ -240,10 +240,22 @@ def publish(comparison_root, output_root, *, fault=lambda stage: None, version="
     hashes.update({str(root/"current.json"): silver.sha(root/"current.json"), str(c/"manifest.json"):silver.sha(c/"manifest.json")})
     ovf, ggf, pairs = [pq.read_table(c/"comparison"/f).to_pylist() for f in
         ("overture_features.parquet", "google_features.parquet", "address_pair_evidence.parquet")]
-    ovpath = Path(json.loads(ovf[0]["name_source_ref_json"])["parquet_path"])
-    lp = Path(json.loads(pairs[0]["m1_source_link_ref_json"])["parquet_path"])
+    def pinned_path(name):
+        paths = [Path(p) for p in cm["signature"]["inputs_sha256"] if Path(p).name == name]
+        if len(paths) != 1:
+            raise ValueError("Missing/ambiguous comparison input: " + name)
+        return paths[0]
+    lp = pinned_path("source_links.parquet")
+    pp = pinned_path("google_places.parquet")
+    sources = [Path(p) for p in cm["signature"]["inputs_sha256"]
+               if Path(p).suffix == ".parquet" and Path(p) not in {lp, pp}]
+    if len(sources) != 1:
+        raise ValueError("Missing/ambiguous comparison Overture input")
+    ovpath = sources[0]
     m = lp.parent.parent
-    silver.verify_release(m)
+    gm = silver.verify_release(m)
+    if pp != m/"silver/google_places.parquet" or gm["signature"]["inputs_sha256"].get(str(ovpath)) != hashes[str(ovpath)]:
+        raise ValueError("Comparison/Google Silver input lineage mismatch")
     if out.is_relative_to(m.parent.parent) or m.parent.parent.is_relative_to(out) or out.is_relative_to(ovpath.parent):
         raise ValueError("Output overlaps Silver inputs")
     refs = dict(overture=str(ovpath), places=str(m/"silver/google_places.parquet"),
@@ -348,6 +360,9 @@ def publish(comparison_root, output_root, *, fault=lambda stage: None, version="
         fault("before_pointer_replace")
         pointer=out/(".current-"+uuid.uuid4().hex)
         pointer.write_text(silver.dump(dict(release_id=rid,manifest_sha256=silver.sha(dest/"manifest.json"))),encoding="utf-8")
+        for p, digest in hashes.items():
+            if silver.sha(p) != digest:
+                raise ValueError("Input changed before pointer activation: "+p)
         os.replace(pointer,out/"current.json")
         return dest, report
     finally:

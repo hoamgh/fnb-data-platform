@@ -420,7 +420,7 @@ def _read_table(path, columns):
 
 def publish(eligibility_root, google_root, er_root, output_root, mapping_path=DEFAULT_MAPPING, *, fault=lambda stage: None):
     # Reuse the existing M1 eligibility verifier; do not replay/rebuild ingestion.
-    from experiments.overture_gold_contract import eligibility
+    from .overture import eligibility
 
     roots = [Path(p).resolve() for p in (eligibility_root, google_root, er_root)]
     out, mapping_path = Path(output_root).resolve(), Path(mapping_path).resolve()
@@ -457,7 +457,7 @@ def publish(eligibility_root, google_root, er_root, output_root, mapping_path=DE
     require(set(unique_index(er_rows, link_key, "ER")) == set(unique_index(_read_table(lp, ["overture_id", *KEY]), link_key, "source links")), "Lost ER links")
     tables, summary = build(overture, _read_table(pp, google_cols), er_rows, load_mapping(mapping_path), refs)
     summary["baseline_reconciliation"] = em["metrics"]["counts"]
-    code = [Path(__file__), Path(silver.__file__), Path(__file__).with_name("categories.py"), Path(__file__).with_name("overture_incremental.py"), Path(eligibility.__file__)]
+    code = [Path(__file__), Path(silver.__file__), Path(__file__).with_name("categories.py"), Path(__file__).with_name("overture_incremental.py"), Path(eligibility.__file__), Path(eligibility.policy.__file__)]
     signature = dict(rule_version=VERSION, mapping_version=summary["mapping_version"], inputs_sha256=hashes,
         code_sha256={str(p.resolve()): silver.sha(p) for p in code}, pyarrow_version=pa.__version__)
     rid = _digest(signature)[:24]
