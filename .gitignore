@@ -22,6 +22,8 @@ build/
 *.db
 *.db-wal
 *.db-shm
+*.duckdb
+*.duckdb.wal
 *.sqlite-wal
 *.sqlite-shm
 *.sqlite3-wal
@@ -43,3 +45,22 @@ node_modules/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Public template contains no credentials.
+!.env.example
+
+# Machine-local runtime/evidence and identity-bearing manual evaluation files.
+/.local/
+/docs/_delivery/evaluation/*.csv
+/docs/_delivery/.pytest*/
+/docs/_delivery/*.log
+.ruff_cache/
+.coverage
+htmlcov/
+/pipelines/**/target/
+/pipelines/**/logs/
+/pipelines/**/dbt_packages/
+/pipelines/**/.user.yml
+
+# Local third-party coursework reference; not a project dataset or redistributable artifact.
+/23120298.PhamQuangMinh*.pdf

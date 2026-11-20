@@ -28,6 +28,20 @@ def check_hashes(hashes):
         require(_sha(path) == expected, "Pinned input/code changed: " + path)
 
 
+def validate_publication_paths(output, inputs):
+    """Reject overlapping resolved paths, not independent siblings of an input file.
+
+    Fingerprints describe files (or explicitly supplied directories). A file's
+    parent is not itself an input directory: campaign metadata can safely sit
+    beside a separate publication subtree.
+    """
+    output = Path(output).resolve()
+    for value in inputs:
+        source = Path(value).resolve()
+        require(not source.is_relative_to(output) and not output.is_relative_to(source),
+                f"Output overlaps an input directory: output={output}; input={source}")
+
+
 @contextmanager
 def publication_lock(output):
     """OS lock released on process death; preserve the existing Human lock API."""
