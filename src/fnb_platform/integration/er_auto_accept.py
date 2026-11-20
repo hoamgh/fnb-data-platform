@@ -79,65 +79,7 @@ def audited_ai(path, audit_path, expected, context):
     return result
 
 
-def coordinate_valid(row):
-    return all(isinstance(row.get(f), (int, float)) and not isinstance(row[f], bool) and math.isfinite(row[f]) and lo <= row[f] <= hi
-        for f, lo, hi in (("latitude", -90, 90), ("longitude", -180, 180)))
-
-
-def gates(er, cat, google, groups, current_human, policy):
-    evidence = json.loads(er["evidence_json"])
-    v3 = evidence.get("comparisons", {}).get("v3", {})
-    signals = v3.get("signals", {})
-    address = v3.get("address_features_v3", {})
-    name = v3.get("name_features", {})
-    conflicts, gaps = [], []
-    google_group, source_group = groups
-    if len(google_group) > 1:
-        conflicts.append("SHARED_GOOGLE_ID")
-    if len(source_group) > 1 and any(current_human[k] != "NON_MATCH" for k in source_group if k != key(er)):
-        conflicts.append("MULTIPLE_GOOGLE_CANDIDATES_UNRESOLVED")
-    if cat["category_relation"] == "CATEGORY_CONFLICT":
-        conflicts.append("CATEGORY_FNB_NON_FNB_CONFLICT")
-    source_flags = json.loads(cat["evidence_json"]).get("source_flags", {})
-    if any(code in {"CONFLICTING_SOURCE_CATEGORIES", "FNB_HIERARCHY_NON_FNB_LABEL"} for codes in source_flags.values() for code in codes):
-        conflicts.append("SOURCE_CATEGORY_CONFLICT")
-    if address.get("clear_conflict") or signals.get("address") == "CONFLICT":
-        conflicts.append("CURRENT_ADDRESS_CONFLICT")
-    if name.get("effective_branch_warning_codes") or name.get("branch_warning_codes") or signals.get("name") == "CONFLICT":
-        conflicts.append("CURRENT_BRANCH_OR_NAME_WARNING")
-    group_resolved = len(source_group) > 1 and all(current_human[k] == "NON_MATCH" for k in source_group if k != key(er))
-    group_conflict_only = v3.get("multiple_candidates") is True and group_resolved and "IDENTITY_METADATA_CONFLICT" not in v3.get("review_reason_codes", [])
-    if signals.get("candidate") == "CONFLICT" and not group_conflict_only:
-        conflicts.append("CANDIDATE_IDENTITY_CONFLICT")
-    metadata_conflicts = json.loads(google.get("conflicting_values_json") or "{}")
-    if google.get("has_metadata_conflict") or google.get("conflict_fields") or metadata_conflicts or evidence.get("google", {}).get("conflicting_values"):
-        conflicts.append("METADATA_CONFLICT")
-    if er["classification"] == "NON_MATCH_CANDIDATE":
-        conflicts.append("ER_NON_MATCH_PROPOSAL")
-    for signal in policy["required_v3_signals"]:
-        if signals.get(signal) != "SUPPORT":
-            gaps.append(signal.upper() + "_SUPPORT_MISSING")
-    if address.get("strong_agreement") is not True:
-        gaps.append("STRONG_ADDRESS_AGREEMENT_MISSING")
-    if address.get("specific_agreement") is not True:
-        gaps.append("SPECIFIC_ADDRESS_AGREEMENT_MISSING")
-    if address.get("uncertain_difference"):
-        gaps.append("UNCERTAIN_ADDRESS_DIFFERENCE")
-    if address.get("reference_only"):
-        gaps.append("REFERENCE_ONLY_ADDRESS")
-    if google.get("metadata_status") not in {"AVAILABLE", "INCOMPLETE_METADATA"} or not er.get("overture_name") or not er.get("google_name") or not coordinate_valid(google) or not coordinate_valid(evidence.get("overture", {})):
-        gaps.append("ESSENTIAL_METADATA_MISSING_OR_INVALID")
-    distance = er.get("distance_m")
-    if not isinstance(distance, (int, float)) or not math.isfinite(distance) or distance < 0:
-        gaps.append("VALID_DISTANCE_MISSING")
-    observed = dict(signals=signals, address=address, name=name, distance_m=distance,
-        coordinates={"overture": {f:evidence.get("overture", {}).get(f) for f in ("latitude", "longitude")},
-                     "google": {f:google.get(f) for f in ("latitude", "longitude")}},
-        google_raw_metadata_ref=evidence.get("google", {}).get("metadata_ref"),
-        google_metadata_status=google.get("metadata_status"), metadata_conflicts=metadata_conflicts,
-        google_conflict_fields=google.get("conflict_fields"), source_flags=source_flags,
-        multiple_candidate_group_resolved_by_current_human_non_match=group_resolved)
-    return sorted(set(conflicts)), sorted(set(gaps)), observed
+from .matching_policy import coordinate_valid, gates
 
 
 def build(data, google_rows, history, ai, policy, provenance):

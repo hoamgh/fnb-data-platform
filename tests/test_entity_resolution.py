@@ -6,7 +6,7 @@ from copy import deepcopy
 import pytest
 
 from fnb_platform.comparison_features import build as features
-from fnb_platform.entity_resolution import DEFAULTS, QUEUE, build, classify, distance_m, name_similarity
+from fnb_platform.entity_resolution import QUEUE, build, distance_m, name_similarity
 
 
 def fixture_rows():
@@ -91,7 +91,10 @@ def test_shared_and_multiple_links_determinism_csv_roundtrip():
     gg.append({**gg[0],'google_identity_value':'google2'})
     li.append({**li[0],'google_identity_value':'google2'})
     t,q,r=run(ov,gg,li)
-    assert set(t['classification'].to_pylist())=={'REVIEW'}
+    # Multiple candidates remain REVIEW; V3 can retain a supported proposal on
+    # the other source's shared identity. Auto-accept still blocks that group.
+    assert {(r['overture_id'],r['google_identity_value']):r['classification'] for r in t.to_pylist()} == {
+        ('ov1','google1'):'REVIEW', ('ov1','google2'):'REVIEW', ('ov2','google1'):'MATCH_CANDIDATE'}
     t2,q2,r2=run(list(reversed(ov)),list(reversed(gg)),list(reversed(li)))
     assert t.to_pylist()==t2.to_pylist() and q==q2 and r==r2
     stream=io.StringIO();w=csv.DictWriter(stream,fieldnames=QUEUE);w.writeheader();w.writerows(q)
@@ -104,14 +107,6 @@ def test_key_loss_rejected():
     ov,gg,li=fixture_rows()
     li.append(deepcopy(li[0]))
     with pytest.raises(ValueError):run(ov,gg,li)
-
-
-def test_threshold_boundaries_and_combined_evidence():
-    assert classify(.9,100,False,False,DEFAULTS)=='MATCH_CANDIDATE'
-    assert classify(.59,501,False,False,DEFAULTS)=='REVIEW'
-    assert classify(.59,501,True,False,DEFAULTS)=='NON_MATCH_CANDIDATE'
-    assert classify(1,0,True,False,DEFAULTS)=='REVIEW'
-    assert classify(1,0,False,True,DEFAULTS)=='REVIEW'
 
 
 @pytest.fixture
@@ -161,9 +156,59 @@ def test_existing_independent_decision_not_overwritten():
     with pytest.raises(ValueError,match='Independent ER'):run(ov,gg,li)
 
 
-@pytest.mark.parametrize('version', ['v1', 'v2', 'v3'])
+@pytest.mark.parametrize('entrypoint', ['canonical', 'legacy_module', 'script'])
+def test_cli_publishes_canonical_release_and_reuses_it(published_features, tmp_path, entrypoint):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from fnb_platform import entity_resolution as er
+    comparison, _ = published_features
+    out = tmp_path / 'cli'
+    repo = Path(__file__).resolve().parents[1]
+    cli = (['-m', 'fnb_platform.integration.entity_resolution'] if entrypoint == 'canonical'
+           else ['-m', 'fnb_platform.entity_resolution'] if entrypoint == 'legacy_module'
+           else [str(repo / 'scripts/entity_resolution.py')])
+    command = [sys.executable, '-B', *cli, '--comparison-root', str(comparison), '--output-root', str(out)]
+    completed = subprocess.run(command, cwd=repo, text=True, capture_output=True, timeout=45)
+    assert completed.returncode == 0, completed.stderr
+    dest = er.silver.read_active(out)
+    assert dest is not None
+    manifest = er.silver.verify_release(dest)
+    assert manifest['signature']['rule_version'] == 'ov-google-er-proposal-v3-experimental'
+    assert json.loads(completed.stdout)['rows'] == manifest['artifacts']['er_results.parquet']['rows']
+    protected = {p: er.silver.sha(p) for p in out.rglob('*') if p.is_file()}
+    replay = subprocess.run(command, cwd=repo, text=True, capture_output=True, timeout=45)
+    assert replay.returncode == 0, replay.stderr
+    assert er.silver.read_active(out) == dest
+    assert all(er.silver.sha(p) == digest for p, digest in protected.items())
+    for obsolete in (['--version','v2'], ['--baseline-root',str(tmp_path/'obsolete')]):
+        rejected = subprocess.run([*command, *obsolete], cwd=repo, text=True, capture_output=True, timeout=45)
+        assert rejected.returncode == 2
+        assert all(er.silver.sha(p) == digest for p, digest in protected.items())
+    failed = subprocess.run([sys.executable, '-B', *cli, '--comparison-root', str(tmp_path/'missing'),
+                             '--output-root', str(out)], cwd=repo, text=True, capture_output=True, timeout=45)
+    assert failed.returncode != 0
+    assert all(er.silver.sha(p) == digest for p, digest in protected.items())
+
+
+def test_only_canonical_helpers_are_fingerprinted(published_features, tmp_path):
+    from pathlib import Path
+    from fnb_platform.integration import entity_resolution as er, matching_policy, matching_evidence
+    comparison, _ = published_features
+    release, _ = er.publish(comparison, tmp_path/'canonical')
+    signature = er.silver.verify_release(release)['signature']
+    assert signature['rule_version'] == matching_policy.VERSION
+    for module in (er, matching_policy, matching_evidence):
+        assert signature['code_sha256'][str(Path(module.__file__).resolve())] == er.silver.sha(module.__file__)
+    assert not any('entity_resolution_v2' in p or 'entity_resolution_v3' in p for p in signature['code_sha256'])
+    with pytest.raises(TypeError):
+        er.publish(comparison, tmp_path/'obsolete', version='v2')
+    with pytest.raises(TypeError):
+        er.publish(comparison, tmp_path/'obsolete', baseline_root=tmp_path/'baseline')
+
+
 @pytest.mark.parametrize('google_present', [False, True])
-def test_zero_pairs_publish_with_manifest_provenance(tmp_path, version, google_present):
+def test_zero_pairs_publish_with_manifest_provenance(tmp_path, google_present):
     import pyarrow as pa
     import pyarrow.parquet as pq
     from fnb_platform import google_silver as s, comparison_features as cf, entity_resolution as er
@@ -186,14 +231,14 @@ def test_zero_pairs_publish_with_manifest_provenance(tmp_path, version, google_p
     comparison = tmp_path/'comparison'
     cf.publish(source, places_root, comparison)
     out = tmp_path/'er'
-    dest, summary = er.publish(comparison, out, version=version)
+    dest, summary = er.publish(comparison, out)
     table = pq.ParquetFile(dest/'er_results.parquet').read()
     assert table.num_rows == 0 and table.schema.equals(er.SCHEMA)
     assert summary['rows'] == 0 and summary['zero_candidate_count'] == 1
     assert summary['unchanged_zero_candidate_overture_ids'][0]['overture_id'] == 'ov1'
     pointer = (out/'current.json').read_bytes()
     checksums = {p: s.sha(p) for p in dest.rglob('*') if p.is_file()}
-    assert er.publish(comparison, out, version=version)[0] == dest
+    assert er.publish(comparison, out)[0] == dest
     assert (out/'current.json').read_bytes() == pointer
     assert checksums == {p: s.sha(p) for p in checksums}
 

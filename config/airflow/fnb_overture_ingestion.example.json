@@ -1,0 +1,15 @@
+{
+  "campaign_id": "pilot-overture-01",
+  "mode": "replay",
+  "source_release": "REPLACE_WITH_PINNED_RELEASE",
+  "inputs": {
+    "old_path": "/inputs/comparison/old.parquet",
+    "old_metadata": "/inputs/comparison/old.json",
+    "new_path": "/inputs/comparison/new.parquet",
+    "new_metadata": "/inputs/comparison/new.json",
+    "ward_path": "/inputs/config/admin_areas/phuong_khanh_hoi.geojson",
+    "comparison_source": "/inputs/comparison"
+  },
+  "pins": {},
+  "releases": []
+}

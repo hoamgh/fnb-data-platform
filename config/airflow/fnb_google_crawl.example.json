@@ -1,0 +1,23 @@
+{
+  "campaign_id": "pilot-google-replay-01",
+  "mode": "replay",
+  "overture_release_id": "2026-10-21.0",
+  "eligibility_run_id": "<24-character-eligibility-run-id>",
+  "inputs": {
+    "crawl_root": "/inputs/bounded-campaign",
+    "overture_path": "/inputs/overture/silver/releases/2026-10-21.0/current_state.parquet",
+    "catalog": "/inputs/overture/eligibility/releases/<24-character-eligibility-run-id>/candidates.parquet"
+  },
+  "store_ids": [],
+  "pins": {},
+  "releases": [
+    {
+      "manifest": "/inputs/overture/silver/releases/2026-10-21.0/manifest.json",
+      "release_id": "2026-10-21.0"
+    },
+    {
+      "manifest": "/inputs/overture/eligibility/releases/<24-character-eligibility-run-id>/manifest.json",
+      "release_id": "<24-character-eligibility-run-id>"
+    }
+  ]
+}

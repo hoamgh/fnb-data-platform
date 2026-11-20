@@ -80,7 +80,7 @@ acceptance policy is inferred here. Serializers are passed through unchanged.
 """
     output = Path(output).resolve()
     fingerprints = {**signature["inputs_sha256"], **signature["code_sha256"]}
-    require(all(not Path(p).resolve().is_relative_to(output) and not output.is_relative_to(Path(p).resolve().parent) for p in fingerprints), "Output overlaps an input directory")
+    validate_publication_paths(output, fingerprints)
     rid = digest(signature)[:24]
     output.mkdir(parents=True, exist_ok=True)
     with (lock or publication_lock)(output):

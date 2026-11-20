@@ -6,9 +6,10 @@ COPY src ./src
 COPY scripts ./scripts
 COPY pipelines ./pipelines
 COPY config ./config
+COPY tests ./tests
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir '.[dbt]' psycopg2-binary==2.9.10 \
+    && pip install --no-cache-dir '.[dbt]' psycopg2-binary==2.9.10 pytest==9.1.1 \
     && useradd --uid 50000 --create-home analytics
 USER analytics
 
@@ -16,4 +17,9 @@ FROM apache/superset:6.0.0 AS superset
 USER root
 # Official lean image needs a database driver; do not change ETL/dbt dependencies.
 RUN uv pip install --python /app/.venv/bin/python --no-cache psycopg2-binary==2.9.10
+USER superset
+
+FROM superset AS superset-duckdb
+USER root
+RUN uv pip install --python /app/.venv/bin/python --no-cache duckdb==1.5.5 duckdb-engine==0.17.0
 USER superset

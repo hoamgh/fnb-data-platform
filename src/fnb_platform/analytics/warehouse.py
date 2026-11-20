@@ -1,4 +1,4 @@
-"""Build a versioned dimensional export from pinned publications. No upstream execution."""
+"""Build a versioned DuckDB warehouse from pinned publications. No upstream execution."""
 
 import argparse
 from collections import Counter
@@ -347,7 +347,15 @@ def verify_bundle(root):
 
 
 def build(
-    gold, analytics, output, gold_sha, analytics_sha, demographics, demographics_sha
+    gold,
+    analytics,
+    output,
+    gold_sha,
+    analytics_sha,
+    demographics,
+    demographics_sha,
+    *,
+    demo=False,
 ):
     import duckdb
     import pyarrow as pa
@@ -356,19 +364,26 @@ def build(
     from fnb_platform import publication
 
     started = time.perf_counter()
-    context = inputs(
-        gold, analytics, gold_sha, analytics_sha, demographics, demographics_sha
+    from .demo import context as demo_context
+
+    output = Path(output).resolve()
+    context = (
+        demo_context(output)
+        if demo
+        else inputs(
+            gold, analytics, gold_sha, analytics_sha, demographics, demographics_sha
+        )
     )
     code = [
         Path(__file__),
         Path(publication.__file__),
-        ROOT / "scripts/load_analytics.py",
         ROOT / "docker/analytics/serving.sql",
         *sorted(PROJECT.rglob("*.sql")),
         *sorted(PROJECT.rglob("*.yml")),
     ]
     publication.validate_publication_paths(
-        output, [gold, analytics, *context["pins"], *code]
+        output / "releases",
+        [*([] if demo else [gold, analytics]), *context["pins"], *code],
     )
     signature = dict(
         version=KIND,
@@ -494,10 +509,6 @@ def build(
                 cursor = con.execute(query)
                 description = [(c[0], str(c[1])) for c in cursor.description]
                 rows = cursor.fetchall()
-                dest = str(stage / (name + ".csv")).replace("'", "''")
-                con.execute(
-                    rf"copy ({query}) to '{dest}' (format csv, header true, null '\N', force_quote *)"
-                )
                 tables[name] = dict(
                     columns=description,
                     rows=len(rows),
@@ -509,7 +520,7 @@ def build(
             require(
                 sha(path) == expected, "Published input changed during analytics build"
             )
-        artifacts = {name + ".csv": sha(stage / (name + ".csv")) for name in tables}
+        artifacts = {"warehouse.duckdb": sha(stage / "warehouse.duckdb")}
         artifacts["dbt-target/run_results.json"] = sha(
             stage / "dbt-target/run_results.json"
         )
@@ -523,6 +534,7 @@ def build(
             tables=tables,
             artifacts=artifacts,
             expected=context["expected"],
+            dbt_vars=variables,
             dbt=dict(
                 models=sum(r["unique_id"].startswith("model.") for r in results),
                 tests=sum(r["unique_id"].startswith("test.") for r in results),
@@ -555,15 +567,40 @@ def build(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--gold", type=Path, required=True)
-    parser.add_argument("--analytics", type=Path, required=True)
-    parser.add_argument("--gold-sha", required=True)
-    parser.add_argument("--analytics-sha", required=True)
-    parser.add_argument("--demographics", type=Path, required=True)
-    parser.add_argument("--demographics-sha", required=True)
+    parser.add_argument("--gold", type=Path)
+    parser.add_argument("--analytics", type=Path)
+    parser.add_argument("--gold-sha")
+    parser.add_argument("--analytics-sha")
+    parser.add_argument("--demographics", type=Path)
+    parser.add_argument("--demographics-sha")
     parser.add_argument("--output", type=Path, default=Path("/analytics-out"))
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Only invented, explicitly labeled demo data",
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Publish an independent read-only DuckDB snapshot",
+    )
     args = parser.parse_args()
+    if not args.demo and not all(
+        [
+            args.gold,
+            args.analytics,
+            args.gold_sha,
+            args.analytics_sha,
+            args.demographics,
+            args.demographics_sha,
+        ]
+    ):
+        parser.error(
+            "Real mode requires all six explicit input/release hash arguments; no demo fallback"
+        )
+    if args.demo and args.check_only:
+        parser.error("Demo is a separate synthetic build, never real-input admission")
     if args.check_only:
         value = inputs(
             args.gold,
@@ -585,7 +622,7 @@ if __name__ == "__main__":
             )
         )
     else:
-        build(
+        release = build(
             args.gold,
             args.analytics,
             args.output,
@@ -593,4 +630,18 @@ if __name__ == "__main__":
             args.analytics_sha,
             args.demographics,
             args.demographics_sha,
+            demo=args.demo,
         )
+        if args.serve:
+            from .duckdb_serving import publish
+
+            snapshot = publish(release, args.output)
+            print(
+                dump(
+                    dict(
+                        status="SERVING_READY",
+                        snapshot_id=snapshot["snapshot_id"],
+                        bundle_id=snapshot["bundle_id"],
+                    )
+                )
+            )

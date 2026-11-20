@@ -1,0 +1,18 @@
+{
+  "campaign_id": "pilot-integration-01",
+  "mode": "replay",
+  "overture_release_id": "REPLACE_WITH_PINNED_OVERTURE_SILVER_RELEASE",
+  "google_places_release_id": "REPLACE_WITH_PINNED_GOOGLE_PLACES_RELEASE",
+  "eligibility_run_id": "REPLACE_WITH_PINNED_ELIGIBILITY_RUN",
+  "inputs": {
+    "overture_path": "/inputs/overture/releases/2026-10-21.0/current_state.parquet",
+    "eligibility_root": "/inputs/eligibility",
+    "google_root": "/inputs/places",
+    "reviews_root": "/inputs/reviews",
+    "human_root": "/inputs/human"
+  },
+  "reviews_release": "REPLACE_WITH_PINNED_REVIEWS_RELEASE",
+  "reuse": {},
+  "pins": {},
+  "releases": []
+}

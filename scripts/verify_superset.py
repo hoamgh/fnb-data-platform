@@ -1,6 +1,7 @@
 """Operator-run BI browser verification; credentials stay in memory and local secret files."""
 
 import argparse
+import os
 import json
 import math
 from pathlib import Path
@@ -105,11 +106,14 @@ def verify(url, output, chrome):
     from playwright.sync_api import sync_playwright, expect
 
     root = Path(__file__).resolve().parents[1]
-    assets = json.loads((root / ".local/analytics/superset-assets.json").read_text())
-    pointer = json.loads((root / ".local/analytics/current.json").read_text())
+    analytics_root = Path(
+        os.environ.get("FNB_ANALYTICS_OUTPUT", root / ".local/analytics")
+    )
+    assets = json.loads((analytics_root / "superset-assets.json").read_text())
+    pointer = json.loads((analytics_root / "current.json").read_text())
     manifest = json.loads(
         (
-            root / ".local/analytics/releases" / pointer["bundle_id"] / "manifest.json"
+            analytics_root / "releases" / pointer["bundle_id"] / "manifest.json"
         ).read_text()
     )
     checks = []
@@ -178,7 +182,12 @@ def verify(url, output, chrome):
             page.goto(url + "/login/")
             page.locator("#username").fill("portfolio_admin")
             page.locator("#password").fill(
-                (root / ".auth/fnb/superset_admin_password").read_text().strip()
+                (
+                    Path(os.environ.get("FNB_SECRETS_ROOT", root / ".auth/fnb"))
+                    / "superset_admin_password"
+                )
+                .read_text()
+                .strip()
             )
             page.locator("input[type=submit],button[type=submit]").first.click()
             page.wait_for_url(left_login_page, timeout=60000)
@@ -363,7 +372,7 @@ def verify(url, output, chrome):
                 canonical_records_expected_from_gold=manifest["expected"][
                     "canonical_store_count"
                 ],
-                note="Numeric KPI conservation is independently enforced in PostgreSQL refresh; no formulas duplicated here.",
+                note="Numeric KPI conservation is enforced by the DuckDB snapshot publisher; no formulas duplicated here.",
                 elapsed_seconds=round(time.perf_counter() - started, 2),
             )
             browser.close()
@@ -389,7 +398,7 @@ def verify(url, output, chrome):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default="http://127.0.0.1:18088")
+    parser.add_argument("--url", default="http://127.0.0.1:18089")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--chrome",

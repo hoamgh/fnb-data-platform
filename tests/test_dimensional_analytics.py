@@ -1,6 +1,5 @@
 """Synthetic analytics contracts only; no upstream publications are rebuilt."""
 
-from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
@@ -14,13 +13,9 @@ import pyarrow.parquet as pq
 import pytest
 
 from fnb_platform.analytics import warehouse as wh
+from fnb_platform.analytics.demo import create_sources as fixture_inputs
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location(
-    "load_analytics", ROOT / "scripts/load_analytics.py"
-)
-loader = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(loader)
 
 
 def native_dataset(name):
@@ -55,144 +50,6 @@ def test_warehouse_output_guard_rejects_overlap_but_allows_sibling_publications(
     ]:
         with pytest.raises(ValueError, match="overlaps"):
             validate_publication_paths(output, inputs)
-
-
-def fixture_inputs(folder):
-    folder.mkdir(parents=True, exist_ok=True)
-    s = [
-        dict(
-            store_id="synthetic-a",
-            store_name="Synthetic A",
-            address="Example address",
-            latitude=10.76,
-            longitude=106.70,
-            identity_status="AUTO_ACCEPTED",
-            is_identity_human_verified=False,
-            field_provenance_json="{}",
-            category_validation_status="PROVISIONAL_SOURCE_AGREEMENT",
-            canonical_category="cafe_coffee",
-        ),
-        dict(
-            store_id="synthetic-b",
-            store_name="Synthetic B",
-            address=None,
-            latitude=10.761,
-            longitude=106.701,
-            identity_status="SOURCE_ONLY",
-            is_identity_human_verified=False,
-            field_provenance_json="{}",
-            category_validation_status="PENDING",
-            canonical_category="unknown",
-        ),
-    ]
-    b = [
-        dict(
-            store_id=r["store_id"],
-            analysis_category="cafe_coffee" if i == 0 else "restaurant",
-            area_id="synthetic-area",
-            verification_status=(
-                "MACHINE_ACCEPTED_LINK" if i == 0 else "UNVERIFIED_SOURCE_ONLY"
-            ),
-            analysis_category_basis=(
-                "SOURCE_AGREEMENT" if i == 0 else "OVERTURE_SOURCE_PROVISIONAL"
-            ),
-            analysis_category_provenance_json="{}",
-        )
-        for i, r in enumerate(s)
-    ]
-    mappings = []
-    for r in s:
-        mappings.append(
-            dict(
-                store_id=r["store_id"],
-                source="overture",
-                source_id_kind="overture_id",
-                source_id=r["store_id"],
-                link_status="SOURCE_ONLY",
-                decision_source="SOURCE_ANCHOR",
-                policy_version="synthetic",
-                evidence_hash="synthetic",
-                provenance_json="{}",
-            )
-        )
-    mappings.append(
-        dict(
-            store_id="synthetic-a",
-            source="google",
-            source_id_kind="place_id",
-            source_id="synthetic-google-a",
-            link_status="AUTO_ACCEPTED",
-            decision_source="CANONICAL_POLICY",
-            policy_version="synthetic",
-            evidence_hash="synthetic",
-            provenance_json="{}",
-        )
-    )
-    lineage = json.dumps(dict(reviews_release_id="synthetic-reviews"))
-    reviews = [
-        dict(
-            logical_review_id=f"synthetic-review-{i}",
-            source="google",
-            source_review_id=f"synthetic-review-{i}",
-            google_id_kind="place_id",
-            google_identity_value=(
-                "synthetic-google-a" if i < 2 else "synthetic-google-unmatched"
-            ),
-            published_at=(
-                datetime(2026, 1, i + 1, tzinfo=timezone.utc) if i != 3 else None
-            ),
-            rating=float([1, 5, 4, 9][i]),
-            timestamp_status="VERIFIED" if i != 3 else "MISSING",
-            timestamp_source="SYNTHETIC_TEST",
-            provenance_json="{}",
-            gold_review_lineage_json=lineage,
-        )
-        for i in range(4)
-    ]
-    attached = [dict(r, store_id="synthetic-a") for r in reviews[:2]]
-    places = [
-        dict(
-            google_id_kind="place_id",
-            google_identity_value="synthetic-google-a",
-            rating=4.7,
-            review_count=200,
-        )
-    ]
-    areas = [
-        dict(
-            area_id="synthetic-area",
-            area_name="Synthetic Area",
-            boundary_source="Synthetic test only",
-            boundary_url="synthetic://test",
-            boundary_snapshot="2026-01-01",
-            boundary_license="TEST_FIXTURE",
-            boundary_sha256="synthetic",
-            boundary_geojson="{}",
-            reference_area_km2=2.0,
-            reference_population=4000,
-            reference_year=2025,
-            reference_source_version="synthetic-ref",
-            reference_source_url="synthetic://reference",
-            reference_record_url="synthetic://ward",
-            reference_population_basis="2025_REORGANIZATION_PROPOSAL_NOT_CENSUS",
-            reference_area_basis="PROVIDER_REORGANIZATION_REFERENCE_NOT_INDEPENDENTLY_VERIFIED",
-            reference_quality_status="WARNING",
-            reference_provenance_json="{}",
-            reference_release_id="synthetic-reference",
-        )
-    ]
-    datasets = dict(
-        stores=s,
-        business=b,
-        mappings=mappings,
-        attached=attached,
-        unmatched=reviews[2:],
-        places=places,
-        areas=areas,
-    )
-    for name, rows in datasets.items():
-        pq.write_table(pa.Table.from_pylist(rows), folder / (name + ".parquet"))
-    return datasets
 
 
 def model_connection(folder):
@@ -331,9 +188,7 @@ def test_lost_records_and_bad_flags_rejected(models):
     assert ("lost_stores",) in gate(con, env, source, variables)
 
 
-def test_sql_identifiers_and_bundle_paths_are_not_arbitrary(tmp_path):
-    with pytest.raises(ValueError):
-        loader.identifier("bi; drop database airflow")
+def test_bundle_paths_are_not_arbitrary(tmp_path):
     signature = {"fixture_only": True, "purpose": "path guard"}
     rid = hashlib.sha256(wh.dump(signature).encode()).hexdigest()[:24]
     root = tmp_path / rid
