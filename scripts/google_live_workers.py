@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager, ExitStack
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import hashlib
 import math
@@ -303,23 +303,60 @@ def store_for(place):
 
 def reconcile(database, lake):
     import pyarrow.parquet as pq
+    from crawl_experiment.core.models import Review
+    from crawl_experiment.storage.review_repository import review_content_hash
     if not database.exists():
         raise RuntimeError('Source database missing')
     with sqlite3.connect(database.as_uri()+'?mode=ro', uri=True) as db:
-        records = db.execute('SELECT COUNT(*) FROM review_state').fetchone()[0]
+        state_ids = set(db.execute('SELECT source, source_review_id FROM review_state'))
         pending = db.execute('SELECT COUNT(*) FROM pending_review_events').fetchone()[0]
+        pending_ids = set(db.execute('SELECT source, source_review_id FROM pending_review_events'))
     files, ids, rows = sorted(lake.rglob('*.parquet')), [], 0
+    published_ids = set()
     for file in files:
         reader = pq.ParquetFile(file)
         table = reader.read()  # Full read, not just a footer count.
         footer = json.loads(reader.metadata.metadata[b'review_event_ids'])
-        if len(footer) != table.num_rows:
+        if (not isinstance(footer, list) or len(footer) != table.num_rows
+                or not all(isinstance(event_id, str) and event_id for event_id in footer)):
             raise RuntimeError('Parquet event membership/count mismatch')
+        required = {'source', 'source_review_id', 'content_hash', 'change_type',
+                    'reviewer_name', 'rating', 'review_text', 'owner_response', 'image_urls'}
+        if not required <= set(table.column_names):
+            raise RuntimeError(f'Parquet review payload columns missing: {file}')
+        for row in table.to_pylist():
+            identity = (row['source'], row['source_review_id'])
+            if not all(isinstance(value, str) and value.strip() for value in identity):
+                raise RuntimeError(f'Invalid persisted review identity: {file}')
+            if row['change_type'] not in {'INSERT', 'UPDATE'}:
+                raise RuntimeError(f'Invalid persisted review change type: {file}')
+            review = Review(source=identity[0], source_review_id=identity[1], store_id='',
+                            author=row['reviewer_name'], rating=row['rating'], text=row['review_text'],
+                            owner_response=row['owner_response'], image_urls=row['image_urls'] or [])
+            hashes = {review_content_hash(review)}
+            # The existing hash distinguishes JSON 4 from 4.0, while the Arrow
+            # float64 contract erases that distinction. Accept both encodings
+            # for integral ratings without changing historical hash semantics.
+            if isinstance(review.rating, float) and review.rating.is_integer():
+                hashes.add(review_content_hash(replace(review, rating=int(review.rating))))
+            if row['content_hash'] not in hashes:
+                raise RuntimeError(f'Persisted review content hash mismatch: {file}')
+            published_ids.add(identity)
         ids.extend(footer)
         rows += table.num_rows
     if len(set(ids)) != len(ids):
         raise RuntimeError('Duplicate published event membership')
-    return dict(sqlite_records=records, pending=pending, parquet_rows=rows,
+    if (published_ids | pending_ids) - state_ids:
+        raise RuntimeError('Review event identities absent from SQLite state')
+    missing = state_ids - published_ids
+    if missing - pending_ids:
+        # State-only legacy captures cannot be distinguished from artifact loss.
+        # Neither is sufficient evidence for safe completion or reuse.
+        raise RuntimeError('Missing persisted review coverage without pending evidence: '
+                           f'{len(missing - pending_ids)} identities')
+    return dict(sqlite_records=len(state_ids), pending=pending, parquet_rows=rows,
+        persisted_review_identities=len(published_ids), unpublished_review_identities=len(missing),
+        integrity_scope='logical_identity_coverage_and_content_hashes; full_event_history_not_proven',
         parquet_files=len(files), duplicate_events=0, parquet_bytes=sum(f.stat().st_size for f in files))
 
 

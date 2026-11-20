@@ -70,7 +70,7 @@ def annotate(rows, raw, polygon, boundary_hash):
         if not e.consumer.normalize(row.get('name')): issues.append('MISSING_NAME')
         good = valid_coordinates(row.get('longitude'), row.get('latitude'))
         if not good: issues.append('INVALID_COORDINATES')
-        tx = e.m242.taxonomy_decision({'taxonomy': {
+        tx = e.policy.taxonomy_decision({'taxonomy': {
             'primary': row.get('taxonomy_primary'), 'hierarchy': row.get('taxonomy_hierarchy'),
             'alternates': row.get('taxonomy_alternates')}})
         if tx != 'INCLUDE_HIERARCHY_FNB': issues.append(tx)
@@ -141,7 +141,7 @@ def run(input_root, output_dir, radius_m=50):
     feature = e.read_json(inputs['boundary'])
     polygon = shape(feature['geometry'] if feature['type'] == 'Feature' else feature['features'][0]['geometry'])
     original = tables['candidates.parquet']
-    rows = annotate(original.to_pylist(), inputs['raw'], polygon, e.m242.sha(inputs['boundary']))
+    rows = annotate(original.to_pylist(), inputs['raw'], polygon, e.sha(inputs['boundary']))
     pairs, comparisons = candidate_pairs(rows, radius_m)
     # Preserve typed original columns, including all 725 rows, even if DQ flags exist.
     result = original
@@ -150,7 +150,7 @@ def run(input_root, output_dir, radius_m=50):
             typ = pa.list_(pa.string()) if name == 'prededup_dq_reasons' else pa.bool_() if name == 'spatial_index_eligible' else pa.string()
             result = result.append_column(name, pa.array([r[name] for r in rows], type=typ))
     for name, digest in inputs['fingerprints'].items():
-        e.require(e.m242.sha(input_root / name) == digest, 'Input changed during pre-dedup')
+        e.require(e.sha(input_root / name) == digest, 'Input changed during pre-dedup')
     output_dir.mkdir(parents=True, exist_ok=False)
     pq.write_table(result, output_dir / 'candidates.parquet', compression='zstd')
     pq.write_table(pa.Table.from_pylist(pairs, schema=PAIR_SCHEMA), output_dir / 'candidate_pairs.parquet', compression='zstd')
@@ -162,11 +162,12 @@ def run(input_root, output_dir, radius_m=50):
                    city_inferred=sum(r['city_inferred'] is not None for r in rows),
                    runtime_seconds=time.perf_counter()-started,
                    input_sha256=inputs['fingerprints'], eligibility_policy=e.POLICY,
-                   code_sha256={p.name: e.m242.sha(p) for p in [Path(__file__), Path(e.__file__), Path(e.m242.__file__), Path(e.consumer.__file__)]},
+                   code_sha256={p.name: e.sha(p) for p in [Path(__file__), Path(e.__file__), Path(e.policy.__file__), Path(e.consumer.__file__), e.ROOT / 'experiments/overture_silver/consumer.py']} | {
+                       'experiments/overture_gold_contract/eligibility.py': e.sha(e.ROOT / 'experiments/overture_gold_contract/eligibility.py')},
                    distance_model='haversine sphere R=6371008.8m; inclusive radius',
                    similarity_model='Silver NFKC/casefold/whitespace + difflib SequenceMatcher; names=mean(forward,reverse) v2; addresses=directional v1 unchanged',
                    interpretation='Provisional pair flags only; no merge, deletion, Google verification or Gold publication',
-                   output_sha256={p.name: e.m242.sha(p) for p in output_dir.glob('*.parquet')})
+                   output_sha256={p.name: e.sha(p) for p in output_dir.glob('*.parquet')})
     e.write_json(output_dir / 'summary.json', summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return summary

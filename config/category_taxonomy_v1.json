@@ -1,0 +1,22 @@
+{
+  "mapping_version": "category-taxonomy-v1",
+  "overture_additions": {
+    "restaurant": ["dim_sum_restaurant", "asian_fusion_restaurant", "burger_restaurant", "halal_restaurant", "health_food_restaurant", "middle_eastern_restaurant", "austrian_restaurant", "french_restaurant", "russian_restaurant", "italian_restaurant", "brazilian_restaurant"],
+    "bakery_dessert": ["chocolatier", "donut_shop"],
+    "bar": ["sports_bar", "wine_bar", "hookah_bar"],
+    "other_food": ["food_and_drink", "food_truck_stand", "food_court"],
+    "non_fnb": ["clothing_store", "beauty_salon", "hair_salon", "buddhist_place_of_worship", "apartment_building"]
+  },
+  "overture_non_fnb_roots": ["shopping", "services_and_business", "lifestyle_services", "lodging", "education", "travel_and_transportation", "health_care", "cultural_and_historic", "community_and_government", "sports_and_recreation", "arts_and_entertainment", "geographic_entities"],
+  "google_aliases": {
+    "restaurant": ["restaurant", "Vietnamese restaurant", "seafood restaurant", "Chinese restaurant", "Japanese restaurant", "family restaurant", "noodle shop", "Nhà hàng", "Quán ăn nhỏ", "Nhà hàng Việt Nam", "Nhà hàng hải sản", "Quán mì", "Nhà hàng gia đình", "Nhà hàng phở", "Nhà hàng châu Á", "Nhà hàng thịt gà", "Nhà hàng món nướng", "Nhà hàng cho người ăn chay", "Nhà hàng Trung Quốc", "Nhà hàng sushi", "Nhà hàng cơm", "Nhà hàng Hàn Quốc", "Nhà hàng món lẩu", "Nhà hàng món chay", "Nhà hàng cháo", "Nhà hàng Nhật Bản", "Món nướng", "Nhà hàng Mexico", "Nhà hàng pizza", "Nhà hàng ăn chay", "Nhà hàng chuyên phục vụ bữa sáng", "Quán ăn dành cho trẻ em", "Nhà hàng Thái Lan", "Nhà hàng Áo", "Sushi mang đi", "Nhà hàng phong cách chiết trung", "Thức ăn mang về Trung Quốc", "Nhà hàng Ba Tư", "Nhà hàng chuyên phục vụ bữa nửa buổi"],
+    "cafe_coffee": ["cafe", "café", "coffee shop", "Quán cà phê"],
+    "beverage": ["bubble tea store", "bubble tea shop", "tea house", "juice shop", "Trà trân châu", "Quầy giải khát"],
+    "bakery_dessert": ["bakery", "dessert shop", "ice cream shop", "Tiệm bánh", "Cửa hàng bánh ngọt", "Cửa hàng bánh", "Cửa hàng kem", "Cửa hàng bánh hấp"],
+    "fast_food": ["fast food restaurant", "Nhà hàng ăn nhanh", "Cửa hàng ăn nhanh"],
+    "bar": ["bar", "pub", "cocktail bar", "Quán bia", "Quán bar", "Quán bar cocktail"],
+    "other_food": ["food court", "takeout restaurant", "Khu ăn uống", "Cửa hàng bán đồ ăn nấu sẵn", "Nhà hàng bán đồ ăn mang về", "Cửa hàng giao pizza"],
+    "non_fnb": ["clothing store", "hair salon", "Cửa hàng quần áo", "Chung cư", "Tiệm cắt tóc", "Dự án nhà", "Điểm thu hút khách du lịch", "Chùa phật giáo", "Căn hộ nghỉ dưỡng cho thuê", "Cửa hàng đồ dùng Phật giáo", "Dịch vụ vận tải"]
+  },
+  "food_name_audit_terms": ["nhà hàng", "quán ăn", "quán cà phê", "coffee", "cafe", "bakery", "trà sữa", "quán ốc", "hải sản"]
+}

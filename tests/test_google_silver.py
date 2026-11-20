@@ -254,3 +254,92 @@ def test_missing_timestamp_is_explicitly_incomplete(tmp_path):
     row=tables['silver/google_places.parquet'].to_pylist()[0]
     assert row['observed_at'] is None and row['metadata_status']=='INCOMPLETE_METADATA'
     assert 'MISSING_OR_INVALID_METADATA_TIME' in row['dq_flags']
+
+
+def reseal_artifact(release, relative, table):
+    """Only tamper with pytest releases; reseal every existing integrity check."""
+    pq.write_table(table, release/relative)
+    manifest = json.loads((release/'manifest.json').read_text())
+    manifest['artifacts'][relative].update(sha256=g.sha(release/relative),
+        rows=table.num_rows, logical_sha256=g._digest(table.to_pylist()), schema=str(table.schema))
+    write(release/'manifest.json', manifest)
+    write(release.parents[1]/'current.json', dict(release_id=release.name,
+        manifest_sha256=g.sha(release/'manifest.json')))
+
+
+@pytest.mark.parametrize('relative', ['silver/google_places.parquet', 'silver/source_links.parquet'])
+@pytest.mark.parametrize('damage', ['type', 'missing', 'nullability', 'nested_type'])
+def test_resealed_schema_mismatch_blocks_verify_read_and_publish(inputs, tmp_path, relative, damage):
+    output = tmp_path/'published'
+    release, _ = g.publish(*inputs, output)
+    table = pq.ParquetFile(release/relative).read()
+    if damage == 'missing':
+        table = table.drop([table.column_names[0]])
+    else:
+        index = table.schema.get_field_index('dq_flags') if damage == 'nested_type' else 0
+        field = table.schema.field(index)
+        dtype = pa.list_(pa.large_string()) if damage == 'nested_type' else pa.large_string()
+        replacement = pa.field(field.name, field.type if damage == 'nullability' else dtype,
+                               nullable=damage != 'nullability')
+        table = table.cast(table.schema.set(index, replacement))
+    reseal_artifact(release, relative, table)
+    pointer = (output/'current.json').read_bytes()
+    for verify in [lambda: g.verify_release(release), lambda: g.read_active(output),
+                   lambda: g.publish(*inputs, output)]:
+        with pytest.raises(ValueError, match='Artifact Arrow schema mismatch'):
+            verify()
+    assert (output/'current.json').read_bytes() == pointer
+
+
+def test_historical_contract_without_schema_declaration_is_supported(inputs, tmp_path):
+    output = tmp_path/'published'
+    release, _ = g.publish(*inputs, output)
+    manifest = json.loads((release/'manifest.json').read_text())
+    for relative, spec in manifest['artifacts'].items():
+        spec.pop('schema', None)
+        if relative.endswith('.parquet'):
+            table = pq.ParquetFile(release/relative).read().replace_schema_metadata({b'historical': b'annotation'})
+            pq.write_table(table, release/relative)
+            spec['sha256'] = g.sha(release/relative)
+    write(release/'manifest.json', manifest)
+    write(output/'current.json', dict(release_id=release.name, manifest_sha256=g.sha(release/'manifest.json')))
+    assert g.verify_release(release) == manifest
+    assert g.read_active(output) == release
+    assert g.publish(*inputs, output)[0] == release
+
+
+def test_empty_published_outputs_keep_explicit_contracts(tmp_path):
+    silver = tmp_path/'overture.parquet'
+    pq.write_table(pa.table({'source_id': ['ov1']}), silver)
+    root = make_run(tmp_path, 'google-empty', [dict(source='ov1', result=None, state='PENDING')])
+    release, _ = g.publish([root], silver, tmp_path/'published')
+    for relative, schema in [('silver/google_places.parquet', g.PLACE_SCHEMA),
+                             ('silver/source_links.parquet', g.LINK_SCHEMA)]:
+        table = pq.ParquetFile(release/relative).read()
+        assert table.num_rows == 0 and table.schema.equals(schema)
+    assert g.verify_release(release)
+
+
+@pytest.mark.parametrize('relative,schema', [('silver/google_places.parquet', g.PLACE_SCHEMA),
+                                          ('silver/source_links.parquet', g.LINK_SCHEMA)])
+def test_all_null_values_retain_arrow_contract(inputs, tmp_path, relative, schema):
+    release, _ = g.publish(*inputs, tmp_path/'published')
+    table = pa.Table.from_pylist([{field.name: None for field in schema}], schema=schema)
+    reseal_artifact(release, relative, table)
+    assert g.verify_release(release)
+    actual = pq.ParquetFile(release/relative).read()
+    assert actual.schema.equals(schema) and all(c.null_count == 1 for c in actual.columns)
+
+
+def test_bad_staged_schema_does_not_activate_release(inputs, tmp_path, monkeypatch):
+    output = tmp_path/'published'
+    build = g.build
+    def bad_build(loaded):
+        tables, summary, details = build(loaded)
+        name = 'silver/google_places.parquet'
+        tables[name] = tables[name].drop(['rating'])
+        return tables, summary, details
+    monkeypatch.setattr(g, 'build', bad_build)
+    with pytest.raises(ValueError, match='Artifact Arrow schema mismatch'):
+        g.publish(*inputs, output)
+    assert not (output/'current.json').exists()

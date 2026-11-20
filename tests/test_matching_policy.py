@@ -4,8 +4,8 @@ import pytest
 import pyarrow as pa
 
 from fnb_platform import comparison_features as cf, entity_resolution as er
-from fnb_platform import entity_resolution_v3 as v3
-from test_entity_resolution import fixture_rows, published_features
+from fnb_platform.integration import matching_policy as policy
+from test_entity_resolution import fixture_rows
 
 
 def compare(left,right,address_left,address_right,distance=5,shared=False,multiple=False):
@@ -13,7 +13,7 @@ def compare(left,right,address_left,address_right,distance=5,shared=False,multip
     b=cf.make_feature(dict(name=right,address=address_right),{}, {})
     p=dict(house_component_relation=cf.house_relation(a,b),
         street_component_relation=cf.component_relation(a['street_comparison'],b['street_comparison']))
-    return v3.evaluate(a,b,p,er.name_similarity(a['name_comparison'],b['name_comparison']),distance,shared,multiple,[])
+    return policy.evaluate(a,b,p,er.name_similarity(a['name_comparison'],b['name_comparison']),distance,shared,multiple,[])
 
 
 @pytest.mark.parametrize('left,right,address',[
@@ -121,6 +121,19 @@ def test_fuzzy_brand_only_requires_tight_corroboration():
     assert compare('Oc Qanh','Ốc Oanh','534 Vĩnh Khánh','534 Vĩnh Khánh',25.01)[0]=='REVIEW'
 
 
+@pytest.mark.parametrize('distance,expected', [(99.99,'MATCH_CANDIDATE'), (100.,'MATCH_CANDIDATE'), (100.01,'REVIEW')])
+def test_canonical_positive_distance_boundary(distance, expected):
+    assert compare('ABC Bakery','ABC Bakery','396 Hoàng Diệu','396 Hoàng Diệu',distance)[0] == expected
+
+
+def test_historical_feature_imports_delegate_without_algorithm_copies():
+    from fnb_platform import entity_resolution_v2 as old_features, entity_resolution_v3 as old_policy
+    from fnb_platform.integration import matching_evidence
+    assert old_features.name_features is matching_evidence.name_features
+    assert old_features.evaluate is matching_evidence.evaluate_base_evidence
+    assert old_policy is policy
+
+
 def test_symmetric_new_comparison_signals():
     a=compare('Pizza777','Pizza 777 Quận 4','237/42/5 Hoàng Diệu','237/42/5 Hoàng Diệu')
     b=compare('Pizza 777 Quận 4','Pizza777','237/42/5 Hoàng Diệu','237/42/5 Hoàng Diệu')
@@ -133,25 +146,10 @@ def test_all_original_values_preserved_contract_and_order():
     tables,_=cf.build(*(pa.Table.from_pylist(r) for r in [ov,gg,links]),{k:('test.parquet','hash') for k in ['overture','places','links']})
     args=[tables['comparison/'+n+'.parquet'].to_pylist() for n in ['overture_features','google_features','address_pair_evidence']]+[ov,gg,links]
     refs=dict(overture='ov.parquet',places='gg.parquet',pairs='pairs.parquet')
-    t,q,r=er.build(*args,refs,version='v3')
-    t2,q2,r2=er.build(*[list(reversed(x)) for x in args],refs,version='v3')
+    t,q,r=er.build(*args,refs)
+    t2,q2,r2=er.build(*[list(reversed(x)) for x in args],refs)
     assert t.to_pylist()==t2.to_pylist() and q==q2 and r==r2
     row=t.to_pylist()[0];assert row['er_status']=='ER_PENDING' and row['overture_address']=='K62 Bến Vân Đồn'
-    assert row['rule_version']==v3.VERSION
+    assert row['rule_version']==policy.VERSION
     for flag in json.loads(row['flags_json']):
         assert all(flag[k] for k in ['reason','evidence_json','observation_ref','rule_version','recommended_action'])
-
-
-def test_separate_versioned_atomic_output(published_features,tmp_path):
-    root,_=published_features;v1=tmp_path/'v1';v2root=tmp_path/'v2'
-    er.publish(root,v1);er.publish(root,v2root,version='v2',baseline_root=v1)
-    protected={p:er.silver.sha(p) for p in v2root.rglob('*') if p.is_file()}
-    out=tmp_path/'v3'
-    def fail(stage):
-        if stage=='after_stage_validation':raise RuntimeError('injected')
-    with pytest.raises(RuntimeError):er.publish(root,out,version='v3',baseline_root=v2root,fault=fail)
-    assert not (out/'current.json').exists()
-    a,s=er.publish(root,out,version='v3',baseline_root=v2root)
-    b,t=er.publish(root,out,version='v3',baseline_root=v2root)
-    assert a==b and s==t and all(er.silver.sha(p)==h for p,h in protected.items())
-    with pytest.raises(ValueError,match='separate'):er.publish(root,v2root,version='v3',baseline_root=v2root)

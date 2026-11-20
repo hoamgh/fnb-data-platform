@@ -24,6 +24,33 @@ from crawl_experiment.sources.google_maps.poi_input import search_plan, coordina
 POLICY = dict(max_scrolls=5, max_reviews=50, review_idle_limit=2)
 
 
+def campaign_code_fingerprints():
+    """Explicit active runtime dependencies; old campaigns retain their pinned code."""
+    paths = [Path(__file__), Path(workers.__file__), ROOT/'scripts/google_overture_workers.py',
+             ROOT/'crawl_experiment/__init__.py', ROOT/'crawl_experiment/sources/__init__.py',
+             Path(e.__file__), Path(e.policy.__file__), Path(e.consumer.__file__),
+             ROOT/'experiments/overture_gold_contract/eligibility.py',
+             ROOT/'experiments/overture_silver/consumer.py',
+             ROOT/'experiments/overture_incremental/run.py', ROOT/'experiments/overture_incremental/publish.py',
+             ROOT/'src/fnb_platform/overture/__init__.py',
+             ROOT/'src/fnb_platform/overture/comparison_run.py', ROOT/'src/fnb_platform/overture/comparison_publication.py',
+             ROOT/'src/fnb_platform/overture_incremental.py', ROOT/'src/fnb_platform/overture_snapshot.py',
+             ROOT/'src/fnb_platform/overture/snapshot.py']
+    modules = {
+        'sources/google_maps': '__init__ candidate_ranking crawler deadline extractor health navigator paginator place_details poi_input review_surface review_timestamps selectors',
+        'core': '__init__ errors failure_taxonomy models statuses',
+        'storage': '__init__ checkpoint_repository parquet_review_writer place_access_repository review_repository',
+        'orchestration': '__init__ access_policy crawlee_adapter retry_policy review_incremental review_reconciliation',
+        'browser': '__init__ browser_factory seleniumbase_session session_manager windows_worker',
+        'network': '__init__ network_identity proxy_provider',
+        'observability': '__init__ metrics run_artifacts',
+        'runners': '__init__ full_crawl_runner',
+    }
+    paths.extend(ROOT/'crawl_experiment'/package/(name+'.py')
+                 for package, names in modules.items() for name in names.split())
+    return {str(p.relative_to(ROOT)): e.sha(p) for p in sorted(set(paths))}
+
+
 def progress_snapshot(places, output):
     """One reconciled row per campaign ID; keep failed/unresolved attempts visible."""
     records = {p['place_key']:dict(place_key=p['place_key'], state='PENDING', attempts=[])
@@ -104,7 +131,7 @@ def prepare(input_root, output):
                    search_mode=None,
                    dq_flags=['SOURCE_ADDRESS_MISSING'] if not (r['address'] or '').strip() else [],
                    geography_inference_basis='POLYGON_COVERS',
-                   geography_boundary_sha256=e.m242.sha(inputs['boundary']))
+                   geography_boundary_sha256=e.sha(inputs['boundary']))
               for r in tables['candidates.parquet'].to_pylist()]
     boundary=e.read_json(inputs['boundary'])
     context=boundary.get('properties',{}).get('admin_area_name')
@@ -118,25 +145,18 @@ def prepare(input_root, output):
                      search_reason=plan['reason'],dq_flags=plan['dq_flags'])
         workers.store_for(place)
     signature = dict(inputs=inputs['fingerprints'], limits=POLICY,
-                     code_sha256={str(p.relative_to(ROOT)):e.m242.sha(p) for p in [
-                         Path(__file__), Path(workers.__file__),
-                         ROOT/'crawl_experiment/sources/google_maps/crawler.py',
-                         ROOT/'crawl_experiment/sources/google_maps/paginator.py',
-                         ROOT/'crawl_experiment/runners/full_crawl_runner.py',
-                         ROOT/'crawl_experiment/sources/google_maps/poi_input.py',
-                         ROOT/'crawl_experiment/core/models.py',
-                         ROOT/'scripts/google_overture_workers.py']})
-    signature['branch_verifier_sha256']=e.m242.sha(ROOT/'crawl_experiment/sources/google_maps/navigator.py')
+                     code_sha256=campaign_code_fingerprints())
+    signature['branch_verifier_sha256']=e.sha(ROOT/'crawl_experiment/sources/google_maps/navigator.py')
     output.mkdir(parents=True, exist_ok=True)
     manifest = output / 'manifest.json'
     if manifest.exists():
         prior = e.read_json(manifest)
-        if prior['signature'] != signature or e.m242.sha(output/'catalog.parquet') != prior['catalog_sha256']:
+        if prior['signature'] != signature or e.sha(output/'catalog.parquet') != prior['catalog_sha256']:
             raise ValueError('Campaign changed; use a new output directory')
     else:
         pq.write_table(pa.Table.from_pylist(places), output / 'catalog.parquet', compression='zstd')
         workers.write_json(manifest, dict(signature=signature, counts=metrics['counts'],
-                                        catalog_sha256=e.m242.sha(output/'catalog.parquet')))
+                                        catalog_sha256=e.sha(output/'catalog.parquet')))
     workers.write_json(output/'preparation_summary.json', dict(total_candidates=len(places),
                        limits=POLICY, live_started=False,
                        eligible_for_branch_search=sum(p['search_eligible'] for p in places),

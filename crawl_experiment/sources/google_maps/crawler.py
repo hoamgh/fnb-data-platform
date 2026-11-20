@@ -37,6 +37,7 @@ from .paginator import ReviewPaginator
 from .place_details import extract_place_details
 from .review_surface import ReviewSurface, ReviewSurfaceState
 from .review_timestamps import start_timestamp_collector
+from .deadline import AttemptDeadline, StoreAttemptTimeout
 from crawl_experiment.orchestration.review_incremental import IncrementalWindow
 from crawl_experiment.orchestration.review_reconciliation import ReconciliationWindow
 
@@ -100,6 +101,7 @@ class GoogleMapsCrawler:
         reconciliation_config=None,
     ) -> CrawlResult:
         started_monotonic = self.clock()
+        budget = AttemptDeadline(started_monotonic + self.timeout_seconds, self.clock)
         elapsed_for_store = lambda: elapsed_offset_seconds + (
             self.clock() - started_monotonic
         )
@@ -117,9 +119,13 @@ class GoogleMapsCrawler:
             result, "browser_started", elapsed_seconds=elapsed_offset_seconds
         )
         timestamp_collector = None
+        paginator = None
         try:
+            budget.configure(driver)
             timestamp_collector = start_timestamp_collector(driver) if self.timestamp_enrichment else None
+            budget.check()
             navigator = GoogleMapsNavigator(driver)
+            budget.bind(navigator)
             if warm_up:
                 navigator.warm_up()
                 self.mark_browser_warm_up_completed()
@@ -144,7 +150,9 @@ class GoogleMapsCrawler:
 
             navigator.after_search_navigation = after_search_navigation
             try:
+                budget.prepare()
                 navigator.open_store(store)
+                budget.check()
             except Exception:
                 self._activity(
                     "place_resolution",
@@ -161,6 +169,7 @@ class GoogleMapsCrawler:
                 **getattr(navigator, "last_resolution_diagnostics", {}),
             )
             self._checkpoint(result, "store_resolved", elapsed_seconds=elapsed_for_store())
+            budget.prepare()
 
             # Persist the storefront snapshot before opening reviews. A review
             # UI/sort failure must not discard the public place details.
@@ -180,7 +189,9 @@ class GoogleMapsCrawler:
                 except Exception:
                     pass
 
+            budget.check()
             surface = ReviewSurface(driver)
+            budget.bind(surface)
             surface.advertised_review_count = (place_details or {}).get('review_count')
 
             def before_access_classification() -> None:
@@ -190,6 +201,7 @@ class GoogleMapsCrawler:
             surface_state, review_pane, surface_evidence = (
                 surface.prepare_and_classify()
             )
+            budget.check()
             phase_times["classified"] = self.clock()
             self._record_search_phase(store.id, phase_times, str(surface_state))
             self._activity(
@@ -240,10 +252,12 @@ class GoogleMapsCrawler:
                 raise error
             self._checkpoint(result, "reviews_surface_opened", elapsed_seconds=elapsed_for_store())
             self._checkpoint(result, "review_pane_found", elapsed_seconds=elapsed_for_store())
+            budget.prepare()
             if sort_newest:
                 self._activity("sort_attempted", store_id=store.id)
                 try:
                     surface.sort_newest()
+                    budget.check()
                 except Exception as exc:
                     degraded_state = (
                         ReviewSurfaceState.AUTH_REQUIRED
@@ -267,6 +281,7 @@ class GoogleMapsCrawler:
                     )
                     raise
                 review_pane = surface.resolve_review_pane()
+                budget.check()
                 self._activity("sort_succeeded", store_id=store.id)
                 self._checkpoint(result, "sort_newest_applied", elapsed_seconds=elapsed_for_store())
 
@@ -276,15 +291,24 @@ class GoogleMapsCrawler:
                 max_scrolls=min(self.max_scrolls,(incremental_config or reconciliation_config).max_scrolls) if (incremental or reconciliation) else self.max_scrolls,
                 idle_limit=self.idle_limit,
                 wait_for_idle_limit=self.max_reviews is not None,
-                deadline=self.clock() + self.timeout_seconds,
+                deadline=budget.end,
                 clock=self.clock,
             )
+            paginator.prepare_interaction = budget.prepare
             extractor = ReviewExtractor()
+            extractor.check_deadline = budget.check
             extractor.timestamp_collector = timestamp_collector
-            collected_ids = set()
+            # Paginator.seen_ids owns observed IDs (and idle accounting).
+            # Selection consumes quota even if parsing fails; attempts_by_id
+            # tracks attempted IDs separately from successfully persisted IDs.
+            selected_ids: set[str] = set()
+            attempts_by_id: dict[str, int] = {}
+            successful_ids: set[str] = set()
+            failed_ids: set[str] = set()
             new_ids_in_last_observation = 0
             pending_scroll = None
             while True:
+                budget.check()
                 locate_started = self.clock()
                 cards = paginator.cards()
                 locate_cards_ms = (self.clock() - locate_started) * 1000
@@ -298,18 +322,23 @@ class GoogleMapsCrawler:
                     persisted=0,
                 )
                 dedupe_ms = (self.clock() - dedupe_started) * 1000
-                new_ids = set(getattr(paginator.state, "last_new_ids", set()))
-                if new_ids_in_last_observation and not new_ids:
-                    new_ids = {
-                        card.get_attribute(selectors.REVIEW_ID_ATTRIBUTE)
-                        for card in cards
-                    }
-                    new_ids.discard(None)
-                    new_ids.discard("")
-                if self.max_reviews is not None:
-                    remaining = self.max_reviews - len(collected_ids)
-                    new_ids = set(sorted(new_ids - collected_ids)[:remaining])
-                    collected_ids.update(new_ids)
+                ordered_ids = {}
+                for card in cards:
+                    budget.check()
+                    review_id = card.get_attribute(selectors.REVIEW_ID_ATTRIBUTE)
+                    if review_id:
+                        ordered_ids[review_id] = None
+                dom_ids = list(ordered_ids)
+                for review_id in dom_ids:
+                    if self.max_reviews is not None and len(selected_ids) >= self.max_reviews:
+                        break
+                    selected_ids.add(review_id)
+                # A failed ID may retry only on a later observation, at most
+                # once. This does not change growth, idle or stop conditions.
+                new_ids = {review_id for review_id in dom_ids
+                           if review_id in selected_ids and review_id not in successful_ids
+                           and (review_id not in attempts_by_id
+                                or (review_id in failed_ids and attempts_by_id[review_id] < 2))}
                 self._trace_review_ids(store.id, new_ids, paginator.state.scroll_count)
                 if timestamp_collector is not None:
                     try:
@@ -318,7 +347,9 @@ class GoogleMapsCrawler:
                         timestamp_collector.failed = True
                         logging.getLogger(__name__).warning("Timestamp capture unavailable; retaining DOM reviews")
                 extract_ms, persist_ms = self._extract_new_reviews(
-                    cards, store.id, extractor, result, new_ids, incremental, reconciliation
+                    cards, store.id, extractor, result, new_ids, incremental, reconciliation,
+                    attempts_by_id=attempts_by_id, successful_ids=successful_ids, failed_ids=failed_ids,
+                    check_deadline=budget.check,
                 )
                 result.reviews_seen = incremental.metrics['reviews_examined'] if incremental else len(paginator.state.seen_ids)
                 result.scroll_count = paginator.state.scroll_count
@@ -351,8 +382,9 @@ class GoogleMapsCrawler:
                     new_reviews=new_ids_in_last_observation,
                     idle_count=idle_count,
                 )
+                budget.check()
                 reason = 'known_streak_boundary' if incremental and incremental.stopped else paginator.stop_reason()
-                if self.max_reviews is not None and len(collected_ids) >= self.max_reviews:
+                if self.max_reviews is not None and len(selected_ids) >= self.max_reviews:
                     reason = "max_reviews"
                 elif self.max_reviews is not None and idle_count >= self.idle_limit:
                     reason = "no_new_reviews"
@@ -393,6 +425,16 @@ class GoogleMapsCrawler:
                     CrawlStatus.EXTRACTION_DEGRADED, CrawlStatus.PAGINATION_STALLED}:
                 return self._closed_completed(result, str(result.status))
             return result
+        except StoreAttemptTimeout as exc:
+            result.status = CrawlStatus.PARTIAL_TIMEOUT
+            result.stop_reason = 'timeout'
+            result.failure_stage = 'attempt_deadline'
+            result.error = str(exc)
+            if paginator is not None:
+                result.scroll_count = paginator.state.scroll_count
+                result.reviews_seen = (incremental.metrics['reviews_examined'] if incremental
+                                       else len(paginator.state.seen_ids))
+            return result
         except Exception as exc:
             # A source-confirmed permanent closure is a completed metadata job.
             # Never suppress auth/rate-limit, browser, server or persistence errors.
@@ -407,6 +449,10 @@ class GoogleMapsCrawler:
             result.error = f"{type(exc).__name__}: {exc}"
             raise
         finally:
+            try:
+                budget.restore()
+            except Exception:
+                logging.getLogger(__name__).warning('Could not restore WebDriver timeouts', exc_info=True)
             if timestamp_collector is not None:
                 try:
                     timestamp_collector.close()
@@ -433,6 +479,15 @@ class GoogleMapsCrawler:
                 result.failure_stage,
                 elapsed_seconds=result.elapsed_seconds,
             )
+            if self.clock() >= budget.end and result.status in {
+                    CrawlStatus.COMPLETE, CrawlStatus.NO_REVIEWS, CrawlStatus.PARTIAL_LIMIT}:
+                # A final checkpoint can itself consume the remaining budget.
+                # Update the persisted progress marker before returning partial.
+                result.status = CrawlStatus.PARTIAL_TIMEOUT
+                result.stop_reason = 'timeout'
+                result.failure_stage = 'attempt_deadline'
+                result.elapsed_seconds = max(0.0, elapsed_for_store())
+                self._checkpoint(result, result.failure_stage, elapsed_seconds=result.elapsed_seconds)
 
     @staticmethod
     def _closed_completed(result, reason):
@@ -454,11 +509,17 @@ class GoogleMapsCrawler:
         new_ids: set[str],
         incremental=None,
         reconciliation=None,
+        *,
+        attempts_by_id: dict[str, int],
+        successful_ids: set[str],
+        failed_ids: set[str],
+        check_deadline=lambda: None,
     ) -> tuple[float, float]:
         extract_seconds = 0.0
         persist_seconds = 0.0
         processed_ids: set[str] = set()
         for card in cards:
+            check_deadline()
             review_id = card.get_attribute(selectors.REVIEW_ID_ATTRIBUTE)
             if (
                 not review_id
@@ -466,18 +527,22 @@ class GoogleMapsCrawler:
                 or review_id in processed_ids
             ):
                 continue
+            processed_ids.add(review_id)
+            check_deadline()
+            attempts_by_id[review_id] = attempts_by_id.get(review_id, 0) + 1
             try:
                 extract_started = self.clock()
                 review = extractor.extract(card, store_id)
                 extract_seconds += self.clock() - extract_started
                 persist_started = self.clock()
                 change = self.reviews.upsert_review_state(review)
+                successful_ids.add(review_id)
+                failed_ids.discard(review_id)
                 if incremental:
                     classification=incremental.observed(review,change)
                     self._activity('incremental_review_classified',store_id=store_id,review_id=review_id,classification=classification)
                 if reconciliation:
                     reconciliation.observed(review_id,{ReviewChange.INSERT:'NEW',ReviewChange.UPDATE:'UPDATED',ReviewChange.UNCHANGED:'UNCHANGED'}[change])
-                processed_ids.add(review_id)
                 emitted = change.emitted
                 result.reviews_written += int(emitted)
                 self._activity(
@@ -489,10 +554,21 @@ class GoogleMapsCrawler:
                 persist_seconds += self.clock() - persist_started
                 if incremental and incremental.stopped:
                     break
-            except ReviewParseError:
+            except ReviewParseError as exc:
                 result.parse_errors += 1
+                failed_ids.add(review_id)
+                # ReviewParseError does not reliably classify transient vs
+                # permanent failures. Allow one later-observation retry only.
+                logging.getLogger(__name__).warning(
+                    "Review parse failed store_id=%s review_id=%s attempt=%d/2 error=%s",
+                    store_id, review_id, attempts_by_id[review_id], type(exc).__name__,
+                )
+                self._activity('review_parse_failed', store_id=store_id, review_id=review_id,
+                               attempt=attempts_by_id[review_id],
+                               retry_budget_remaining=2-attempts_by_id[review_id])
                 if incremental:
                     incremental.streak=0
+            check_deadline()
         return extract_seconds * 1000, persist_seconds * 1000
 
     def _activity(self, event: str, **details) -> None:

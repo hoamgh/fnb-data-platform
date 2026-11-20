@@ -1,168 +1,122 @@
-<div align="center">
+# HCMC F&B Data Platform
 
-# HCMC F&B Location Data Integration Pipeline
-
-### Fragmented listings → traceable location data
-
-Multi-source acquisition · Vietnamese address standardization · Explainable entity resolution
-
-![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white)
-![DuckDB](https://img.shields.io/badge/DuckDB-SQL_validation-FFF000?style=flat-square&logo=duckdb&logoColor=black)
-![Parquet](https://img.shields.io/badge/Storage-Parquet-176B6B?style=flat-square)
-![SQLite](https://img.shields.io/badge/State-SQLite-003B57?style=flat-square&logo=sqlite&logoColor=white)
-![Status](https://img.shields.io/badge/Status-Kh%C3%A1nh_H%E1%BB%99i_pilot-2563EB?style=flat-square)
-
-[Results](#results-at-a-glance) · [Architecture](#architecture) · [Engineering](#engineering-highlights) · [Quick start](#quick-start) · [Evidence](docs/PORTFOLIO_AUDIT.md)
-
-</div>
-
-F&B providers describe the same venue differently: names vary, addresses are incomplete, branches share brand names, and listings become stale. This project turns those records into source-linked datasets and explainable match proposals for **market research, competitor analysis and location screening**.
-
-**Implemented:** local acquisition, Silver processing, incremental change detection and experimental ER V3. **Next:** independently verified business identities and a canonical analytics catalog.
-
-## Results at a glance
-
-| **77,966** | **725** | **452** | **476** |
-|:---:|:---:|:---:|:---:|
-| F&B source records | Pilot F&B candidates | Google metadata snapshots | Cross-source candidate links |
-| HCMC-area Overture bbox | Khánh Hội, provisional | 426 identities with metadata | All remain `ER_PENDING` |
-| [Baseline evidence](docs/PORTFOLIO_AUDIT.md#hcmc-area-baseline-verification) | [Pilot schema](docs/CURRENT_DATA_SCHEMA.md) | [Google Silver](docs/GOOGLE_SILVER_M1.md) | [ER V3](docs/M2_ER_V3_EXPERIMENTAL.md) |
-
-> **Regional baseline ≠ completed city-wide integration.** The 77,966 records come from a September 2026 Overture bbox extract, not a city-polygon census or a 77K-place Google crawl. The October Khánh Hội pilot uses a separate release and scope. Match proposals are not verified businesses or measured matching accuracy.
-
-## Architecture
-
-The pipeline separates acquisition, source-specific standardization and identity decisions. Current execution uses local CLI/experiment modules.
+Integrate Overture and Google observations into a reproducible F&B catalog for the Khánh Hội pilot. The project preserves source provenance, separates uncertain identities and reconciles reviews before exposing business analytics. Canonical records describe observed data; they are not a census or independently verified ground truth.
 
 ```mermaid
-flowchart TB
-    O["Overture release"] --> B["Bronze Parquet + manifests"]
-    B --> S["Overture Silver<br/>geography · taxonomy · DQ"]
-    S -->|"pilot candidate queue"| C["Google browser workers"]
-    C --> R["Metadata + review events<br/>SQLite outbox · checkpoints"]
-    R --> G["Google Silver<br/>typed identities · field provenance"]
-    S --> F["Vietnamese name + address features"]
-    G --> F
-    F --> E["ER V3 proposals + review queue"]
-    E --> A["Provisional address links<br/>+ street summaries"]
-    G --> A
-    E -. "future: verified decisions" .-> T["Canonical Gold + analytics"]
-    classDef source fill:#eff6ff,stroke:#3b82f6,color:#172554;
-    classDef process fill:#f0fdf4,stroke:#22c55e,color:#14532d;
-    classDef product fill:#f5f3ff,stroke:#8b5cf6,color:#3b0764;
-    classDef future fill:#fffbeb,stroke:#d97706,color:#78350f,stroke-dasharray:5 5;
-    class O,B,C,R source;
-    class S,G,F process;
-    class E,A product;
-    class T future;
+flowchart LR
+    S[Overture + Google] --> B[Bronze / Silver Parquet]
+    B --> E[Canonical ER V3 + optional Human Review]
+    E --> G[Published Gold Parquet]
+    G --> D[DuckDB + dbt: dimensions, facts, marts]
+    D --> V[Immutable read-only serving snapshot]
+    V --> U[Superset: 20 charts / 3 tabs]
 ```
 
-Foody is a separate acquisition/profiling experiment, outside current Overture–Google ER. The stored OSM ward polygon supplies geographic context. Review events are persisted alongside metadata; they are not inputs to ER V3.
+PostgreSQL serves Superset metadata and the separate Airflow/crawler state databases. DuckDB is the analytics warehouse. Bronze/Silver/Gold remain Parquet releases with manifests and SHA256. SQL owns KPI definitions; Superset reads the shared DuckDB views.
 
-## Engineering highlights
+## Prerequisites
 
-| Challenge | Implementation | Why it matters |
+- Git, PowerShell **7.2+** (`pwsh`), Docker Desktop with Linux containers and Docker Compose v2.
+- Internet for pinned image/dependency downloads and street-map tiles.
+- No Python, conda, dbt or Chrome installation is required on the host for BI setup. All jobs and browser checks run in Docker.
+- Windows is the development host. Linux-host setup is **NOT_VERIFIED**.
+
+## Quick Start — public synthetic Demo
+
+From the repository root:
+
+```powershell
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1
+```
+
+The runner creates `.env` from [.env.example](.env.example) only if absent, validates Docker and available ports, builds the required images, generates missing secrets, builds/tests DuckDB, initializes Superset metadata and imports the data-free native dashboard bundle. Logs, checkpoints and generated data stay in `.local/duckdb-final/mentor-demo/`. Rerun the identical command to recover/resume. Changed source/configuration requires a new `-RunName`; previous runs are preserved.
+
+Demo uses invented non-PII stores/reviews/reference records generated by `src/fnb_platform/analytics/demo.py`. Metrics are derived from these records, never filled with the real pilot's KPIs. The dashboard visibly says SYNTHETIC. Demo does not load private Gold or crawl Google; it has only two example stores, not the 725-record pilot.
+
+| Developer UI | Default URL | Availability |
 |---|---|---|
-| **Reproduce a source snapshot** | Explicit Overture release, fresh Bronze directory, Parquet read-back verification and SHA-256 metadata | Makes inputs inspectable and protects prior snapshots |
-| **Standardize inconsistent records** | Preserve raw values, typed Google IDs, normalized names/addresses and field-level provenance | Every retained or fallback field can be traced to an observation |
-| **Avoid wrong-branch matches** | Combine name, distance, house/street/range evidence and branch warnings; keep ambiguous cases for review | Similar names and nearby coordinates cannot establish identity alone |
-| **Bound spatial comparison work** | Shapely STRtree candidate blocking followed by haversine distance | Produces 3,442 pairs within 50 m from 725 candidates without an all-pairs distance matrix |
-| **Process source changes safely** | New/updated/unchanged/missing states; review ID/content hashes and bounded known-record streaks | Supports repeated updates while preserving uncertainty about closures/deletions |
-| **Recover interrupted collection** | SQLite pending-event outbox, deterministic Parquet batch files, checkpoints and retained metadata | Supports replay and inspection when browser or review extraction fails |
+| Superset | http://127.0.0.1:18101/superset/dashboard/hcmc-fnb-market-overview/ | After setup PASS |
+| dbt Docs / Lineage | http://127.0.0.1:18102/ | After setup PASS; dimensional project by default |
+| Airflow | http://127.0.0.1:18103/ | Only with explicit `-WithRuntime`; not started for BI Demo |
 
-**A concrete identity problem:** two ABC Bakery source records can select one Google branch. The [ER analysis](docs/M2_ER_V2.md) distinguishes a same-address proposal from a pair 320 m apart with different house/street values, while preserving the shared-ID flag.
-
-**Crawler recovery** includes bounded discovery, Vietnamese/English review controls, stale-element reacquisition, review-pane validation and newest-sort confirmation. Metadata can survive a later review failure. [Recovery implementation report →](docs/GOOGLE_CRAWLER_RECOVERY.md)
-
-## Measured outputs
-
-| Workload | Saved result | Interpretation |
-|---|---|---|
-| **ER V3** | **346** match proposals · **6** non-match proposals · **90** review · **34** insufficient-data | Same 476 relationships; no representative labeled precision/recall benchmark |
-| **Google Silver** | **460** typed identity rows: 426 with metadata + 34 missing-metadata placeholders | 251 Overture IDs have no valid selected/opened link in the staged inventory |
-| **Incremental comparison** | **546** new · **2,665** updated · **2,988** unchanged · **24** missing-from-release | Comparable buffered Khánh Hội extracts; missing does not mean closed |
-| **Address enrichment** | **346** provisional Overture attachments; **46** normalized street names | Observed labels and proposed links, not verified addresses or complete street coverage |
-| **Fixture validation** | **604 passed** across 28 selected offline modules before GitHub publication | Tests implementation behavior, not live-source completeness or real-world identity |
-
-Evidence: [incremental manifest analysis](docs/PORTFOLIO_AUDIT.md#incremental-results) · [address enrichment](docs/GOOGLE_ADDRESS_ENRICHMENT_V1.md) · [spatial method](experiments/overture_gold_contract/SPATIAL_PREDEDUP.md) · [test scope and checks](docs/PORTFOLIO_AUDIT.md#validation-performed).
-
-### Data products available locally
-
-- **Source and quality tables:** Bronze snapshots, source catalogs, release change sets, eligibility/DQ reports and spatial candidate pairs.
-- **Integration evidence:** Google current identities, candidate source mappings, comparison features, ER proposals and review queues.
-- **Research outputs:** review change events, provisional address links, a street dictionary and street summaries.
-
-Offline publishers validate versioned artifacts before replacing `current.json`. SQLite and Parquet do not share one transaction; outbox replay provides recoverable delivery. Review uniqueness is enforced within each job database, not across the entire lake.
-
-## Sources and tech stack
-
-| Component | Role and current status |
-|---|---|
-| **Overture Maps** | Regional snapshot baseline, ward filtering, Silver/eligibility and release comparison; 77,966 F&B rows within bbox `[106.55, 10.60, 106.90, 10.95]`, release `2026-09-23.1` |
-| **Google Maps** | SeleniumBase/Chrome acquisition, metadata/review persistence, Silver and recovery; coverage incomplete and collection/reuse rights unresolved |
-| **Foody** | HTTPX/Beautiful Soup/Playwright acquisition experiments; 557-record ward-clipped profile. [Source-selection decision remains inconclusive](experiments/source_evaluation/results/20261101-khanh-hoi-v3/04_source_selection_decision.md) |
-| **OpenStreetMap** | Stored ward boundary, tested JSON-element adapter and separate road-reference study; OSM POIs are outside current ER |
-| **Python · PyArrow · NumPy · Shapely** | Core transformations, Parquet schemas, taxonomy/spatial filtering and comparison features |
-| **DuckDB · SQLite** | [DuckDB SQL validation](experiments/overture_silver/consumer.py) of staged Overture Silver; SQLite dispatch/review state and outbox |
-| **pytest · GitHub Actions** | Fixture/regression tests; Windows CI covers the core baseline and selected experiments |
-
-**Planned:** Apache Airflow orchestration, verified canonical Gold and recommendations. Airflow currently has a [proposed DAG design](docs/12_ORCHESTRATION_OPERATIONS.md), with no executable DAG or production scheduling evidence.
-
-## Project structure
-
-```text
-src/fnb_platform/       Catalog, normalization, incremental comparison, Silver, ER
-crawl_experiment/      Google acquisition, persistence, checkpoints and recovery
-scripts/               Worker runners and offline CLI wrappers
-experiments/           Overture publication, source profiling, browser studies
-config/admin_areas/    Khánh Hội polygon and source provenance
-tests/                 Catalog, crawler, processing and regression fixtures
-docs/                  Implementation reports, design targets and evidence ledger
-requirements/          Pinned offline baseline dependencies
-```
-
-## Quick start
-
-From the repository root, use a chosen CPython environment. The measured local baseline is **Windows / CPython 3.12.7**.
+Superset username is `portfolio_admin`. Copy its password locally without printing it:
 
 ```powershell
-python -m pip install -e ".[test]"
-python -B scripts/run_offline_tests.py
+(Get-Content -Raw .\.local\duckdb-final\mentor-demo\secrets\superset_admin_password).Trim() | Set-Clipboard
 ```
 
-The offline runner selects the core modules and available source experiment suites, blocks external networking and permits local Playwright driver sockets. To exercise Silver, comparison features, ER V3 and enrichment:
+Set ports in `.env` before setup if already occupied; explicit `-Port`, `-DocsPort`, `-PostgresPort` and `-AirflowPort` override them. Each `-RunName` gets an independent Compose project, credentials, metadata volume, output directory and image tags. Only PostgreSQL metadata, Superset and dbt Docs stay running. Build/dbt/browser-verification jobs are on-demand; crawler/Airflow are not started by default.
+
+## Your own data / authorized Real pilot
+
+Demo is publicly reproducible. Real mode needs authorized existing publications, which are not shipped in Git. Keep immutable manifests, upstream provenance and the exact recorded container paths together; do not edit historical manifests to relocate them.
+
+Configure `.env`:
+
+- `FNB_DEMO_VOLUME`: named volume holding pipeline publications, mounted at `/demo` read-only for BI.
+- `FNB_BUSINESS_INPUT_ROOT`, `FNB_DEMOGRAPHICS_INPUT_ROOT`: host publication roots mounted at `/business-input` and `/area-input`.
+- The six `FNB_*_RELEASE` / `FNB_*_MANIFEST_SHA256` entries: explicit container release paths and their manifest hashes. All are mandatory in Real mode; there is no implicit latest selection or Demo fallback.
 
 ```powershell
-python -B -m pytest tests/test_google_silver.py tests/test_comparison_features.py tests/test_entity_resolution_v3.py tests/test_google_address_enrichment.py -q
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Mode Real -RunName my-real-01
 ```
 
-<details>
-<summary><strong>Inspect processing commands without starting a crawl</strong></summary>
+This runs admission, dimensional dbt build/tests, snapshot publication, Superset import and read checks before/during/after refresh. It reuses the three published business marts and never rebuilds upstream Gold. A successful build publishes an independent immutable DuckDB filename; Superset reconnects to its exact read-only URI. Old snapshots remain available to existing readers.
+
+The warehouse reuses four dimensions (`store`, `category`, `area`, `date`), `fact_store_snapshot`, `fact_review` and `bridge_store_source`; no additional matching happens here. See [Dimensional Modeling](docs/DIMENSIONAL_MODELING.md) for grains, measures and source-to-target rules, and [BRD](docs/01_BRD.md) for business scope.
+
+Full source collection is separate from BI setup. Start orchestration only when needed:
 
 ```powershell
-python -B scripts/google_silver.py --help
-python -B scripts/comparison_features.py --help
-python -B scripts/entity_resolution.py --help
-python -B scripts/google_address_enrichment.py --help
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -RunName mentor-demo -WithRuntime
 ```
 
-Stage reruns need pinned source inputs and preceding publications: [Google Silver instructions](docs/GOOGLE_SILVER_M1.md) · [ER V3 instructions](docs/M2_ER_V3_EXPERIMENTAL.md).
+Use a new run name when enabling `-WithRuntime` after a completed BI-only run, because execution options are fingerprinted. Copy the three `config/airflow/*.example.json` files into `.local/`, replace placeholders with licensed inputs, explicit release IDs/hashes, campaign ID and bounded limits, then set `FNB_INPUT_ROOT` before starting the runtime. The DAGs publish Overture Bronze/Silver, Google Places/Reviews Silver, then Comparison → ER → Category → Mapping → Gold → dbt. Human decisions are retained; unresolved links remain separate.
 
-</details>
+The existing replay entrypoint accepts an admitted config:
 
-Runtime `data/` and `output/` are ignored by Git, and some inputs remain in a sibling historical worktree. A clone alone cannot reproduce the saved real-data results. The core package does not declare the entire browser/experiment stack; a clean end-to-end installation remains unverified.
+```powershell
+pwsh -File .\scripts\Invoke-FnbDag.ps1 -ProjectName fnb-duckdb-my-runtime-runtime -DagId fnb_integration_gold -ConfigFile .\.local\pinned-integration.json
+```
 
-## Roadmap and boundaries
+Use the project created by your own `-RunName my-runtime -WithRuntime`. `Invoke-FnbDag.ps1` executes `airflow dags test`; it is not a scheduled DagRun. Google live collection uses `scripts/google_live_workers.py`, requires explicit `--operator-submit`, authorized catalog, bounded `--limit/--workers/--max-reviews/--max-scrolls/--per-store-seconds/--total-seconds`, and possibly an operator-owned browser profile. Its live containment implementation explicitly requires Windows; it is not a verified Linux-container crawler. Seven pending crawler/smoke changes and the live acceptance helper are intentionally outside this package. Do not assume Docker BI setup enables unattended full crawling or supplies sessions. Once authorized upstream releases exist, Real mode refreshes BI as above.
 
-1. **Validate identity:** independently label branch-sensitive decisions, measure held-out precision/recall and candidate recall, then publish reviewed canonical IDs.
-2. **Make the pilot portable:** package complete dependencies, parameterize historical paths and supply sanitized fixtures with pinned manifests.
-3. **Expand with evidence:** introduce versioned geographic scopes and benchmark representative density, memory/disk use and recovery before HCMC-wide collection. [Expansion notes →](docs/TPHCM_CRAWL_EXPANSION_NOTES.md)
+## dbt Docs, restart and safe stop
 
-Current matching rules are ward-scoped. Full-city coverage, scalability, deployed consumers and commercial impact have not been validated. Provider permissions and review-data retention must be resolved before expanding or sharing derived products.
+Profiles, `FNB_WAREHOUSE_DUCKDB` and `FNB_DBT_DATABASE` are selected automatically. Switch the current Demo to its real generated business lineage:
 
-<details>
-<summary><strong>Data rights and privacy</strong></summary>
+```powershell
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Docs business_analytics
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Action Restart
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Action Stop
+```
 
-The [MIT license](LICENSE) covers software. Provider data retains separate [Overture attribution](https://docs.overturemaps.org/attribution/), [OSM/ODbL obligations](https://www.openstreetmap.org/copyright) and [Google Maps restrictions](https://www.google.com/intl/en/help/terms_maps/). Browser access does not establish permission to collect, retain or republish content. Keep raw reviews, cookies and browser sessions private.
+Use the same run name, mode and configured ports for your own deployment. Four projects remain separate: `area_enrichment`, `gold_staging`, `dimensional_analytics`, `business_analytics`. Gold/Area Docs require those projects' own built artifacts; provide the optional Area root/release in `.env`. Demo only builds dimensional and business projects. Missing real artifacts produce an explicit error; lineage is not fabricated.
 
-</details>
+Restart checks health and the dashboard; Stop retains PostgreSQL volumes, secrets and warehouse files. Rerun Setup to start again. To start fresh safely, choose a new run name and unused ports. There is no automatic destructive reset; do not use `down -v`, remove volumes or delete publication/checkpoint files.
+
+## Verification and Monitoring handoff
+
+M5 Real `m5-real-01` passed at commit `97c7bf1`: 725 canonical records, 302 accepted links, 423 source-only, 1,027 source mappings and 10,139 logical reviews (6,942 attached / 3,197 unmatched). Seven dimensional models / 41 dbt tests passed; focused container tests were 55 PASS / 8 platform-dependent SKIP. The 20-chart/3-tab dashboard passed 27 checks before, during and after refresh, including street tiles and GRID/DETAIL; hashes/grains/reconciliation and dbt Docs passed. These are Real pilot results; the public Demo below is separately verified on invented data.
+
+Fresh-source verification, isolated from local `.env`, databases, publications and existing metadata:
+
+```powershell
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -FreshClone -RunName mentor-fresh-01 -Port 18111 -DocsPort 18112 -PostgresPort 15511
+```
+
+The manual job exports Git source plus the explicit DX files, clears inherited FNB/Compose settings, then checks first setup, stop, rerun and restart using separate paths/projects/images/volumes. It uses no host Python. Inspect `.local/mentor-verification/mentor-fresh-01/verification.json`. Logs/screenshots/databases are ignored by Git. No commit or push is performed by the runner.
+
+**Windows fresh-source workflow PASS:** `mentor-fresh-01` completed first setup, stop, rerun and restart against its checksum-verified frozen export, with the corrected resume driver. It used new metadata/warehouse paths and no private source inputs. Demo dbt passed 7 models/41 tests; fresh-image focused tests passed 55 with 9 platform-dependent skips. Browser checks passed 27/27 before, during and after refresh and after restart, with street tiles and GRID/DETAIL. Logical table hashes/counts were conserved; dbt Docs opened successfully. Environment-restore and frozen-source rejection regressions are included in 23 passing host tests. The original M5 Alidade Smooth map was subsequently restored and passed the same 27 browser checks using the shared-network localhost verifier; the frozen source and data were preserved. Linux-host execution remains NOT_VERIFIED.
+
+To continue an interrupted verification against its unchanged frozen export, repeat that command with `-ResumeFresh`. The driver checks the exported file hashes and first successful manifest, retains passed stages, and launches each remaining stage in a separate PowerShell process. It never copies changed root code into the old export or overwrites a child signature to force admission. Source/configuration changes still require a new run name for a new-source test.
+
+[Monitoring handoff](docs/MONITORING_HANDOFF.md) identifies operational databases, checkpoints, publication manifests, Airflow logs and dbt/DQ evidence. No monitoring stack is deployed.
+
+## Known limitations
+
+- Real publications, cookies, credentials and raw/review data are not distributed. Their usage/redistribution rights are separate from the code.
+- Accepted ER links are machine decisions, not human-verified ground truth. Unknown categories/dates remain unknown; unmatched reviews keep their Google identity.
+- Area/population references retain source/year/basis/WARNING status; observed density is not a full-market census.
+- The default map retains M5's light Alidade Smooth basemap with provider attribution. Local development on localhost needs no API key; the on-demand browser verifier shares Superset's network namespace to test the same loopback UI. External deployments need the provider's own domain/key configuration. Tiles require network/provider availability; localhost URLs are not a public deployment.
+- Airflow business E2E, live crawling and Linux-host setup are not verified by the BI Demo. Crawler persistence remains SQLite/file plus opt-in PostgreSQL, not PostgreSQL-only.

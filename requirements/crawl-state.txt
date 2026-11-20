@@ -1,0 +1,2 @@
+# Optional opt-in PostgreSQL crawl-state adapter
+psycopg[binary]==3.3.5

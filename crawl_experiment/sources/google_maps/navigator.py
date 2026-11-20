@@ -22,6 +22,7 @@ from crawl_experiment.core.models import Store
 from . import selectors
 from .candidate_ranking import RankingConfig, candidate_id, evaluate, rank
 from .health import HealthState, PageEvidence, classify_page
+from .deadline import StoreAttemptTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -62,16 +63,25 @@ class GoogleMapsNavigator:
         self.inspection_name_threshold = inspection_name_threshold
         self.clock = clock
         self.sleeper = sleeper
+        self.check_deadline = lambda: None
+        self.prepare_interaction = lambda: None
         self.last_resolution_diagnostics: dict[str, object] = {}
 
     def warm_up(self) -> None:
         try:
+            self.prepare_interaction()
             self.driver.get(self.base_url)
+            self.check_deadline()
+        except StoreAttemptTimeout:
+            raise
         except Exception as exc:
+            self.check_deadline()
             raise NavigationError(f"google.com warm-up failed: {exc}") from exc
 
     def _check_access(self):
+        self.check_deadline()
         url=self.driver.current_url
+        self.check_deadline()
         body=self.driver.find_element("tag name","body").text
         evidence=self._page_evidence()
         state=classify_page(url,body,evidence=evidence)
@@ -94,12 +104,15 @@ class GoogleMapsNavigator:
         initial_url=f"{self.base_url}/maps/search/{quote_plus(store.query)}/"
         seen={};idle=0;after_scroll=False;selected=None
         try:
+            self.prepare_interaction()
             self.driver.get(initial_url)
+            self.check_deadline()
             self.last_resolution_diagnostics['initial_url']=self.driver.current_url
             callback=getattr(self,'after_search_navigation',None)
             if callback:callback()
             deadline=self.clock()+self.resolve_timeout_seconds
             while True:
+                self.check_deadline()
                 url,evidence=self._check_access()
                 before=len(seen)
                 for candidate in self._candidate_details():
@@ -119,6 +132,7 @@ class GoogleMapsNavigator:
                 if idle>=self.search_idle_limit or self.last_resolution_diagnostics['search_scroll_count']>=self.max_search_scrolls:
                     break
                 if feeds:
+                    self.prepare_interaction()
                     self.driver.execute_script(selectors.SEARCH_SCROLL_SCRIPT,feeds[0])
                     self.last_resolution_diagnostics['search_scroll_count']+=1
                     growth_deadline=self.clock()+min(1.5,self.resolve_timeout_seconds)
@@ -140,6 +154,7 @@ class GoogleMapsNavigator:
             remaining=list(candidates)
             opens=0
             while candidate and opens<self.max_candidate_opens:
+                self.check_deadline()
                 opens+=1
                 remaining=[c for c in remaining if candidate_id(c)!=candidate_id(candidate)]
                 self.last_resolution_diagnostics.pop('resolution_outcome',None)
@@ -149,9 +164,13 @@ class GoogleMapsNavigator:
                 decision['crawl_eligible']=True
                 self.last_resolution_diagnostics['selected_candidate']=decision
                 self.last_resolution_diagnostics['selection_attempt']=decision
-                if self.driver.current_url!=candidate['href']:self.driver.get(candidate['href'])
+                if self.driver.current_url!=candidate['href']:
+                    self.prepare_interaction()
+                    self.driver.get(candidate['href'])
+                    self.check_deadline()
                 deadline=self.clock()+self.resolve_timeout_seconds
                 while True:
+                    self.check_deadline()
                     url,evidence=self._check_access()
                     resolved=self._resolved_place(store,url,evidence,candidates)
                     title=self._place_title();address=self._place_address()
@@ -175,8 +194,9 @@ class GoogleMapsNavigator:
                 self.last_resolution_diagnostics['candidate_attempts'].append(dict(observed,
                     selected_candidate_id=original_id,rejection_reason='DETAIL_NOT_ELIGIBLE_OR_NOT_READY'))
                 candidate=self._best_exact_candidate(store,remaining)
-        except (LimitedViewError,RateLimitedError,ChallengeError):raise
+        except (LimitedViewError,RateLimitedError,ChallengeError,StoreAttemptTimeout):raise
         except Exception as exc:
+            self.check_deadline()
             raise NavigationError(f"Maps navigation failed: {exc}") from exc
         self.last_resolution_diagnostics['search_elapsed_seconds']=self.clock()-search_started
         self.last_resolution_diagnostics.update(navigation_state=str(NavigationState.SEARCH_RESULTS if seen else NavigationState.SEARCH_PREVIEW),
@@ -213,6 +233,7 @@ class GoogleMapsNavigator:
         return " ".join(re.findall(r"[a-z0-9]+", (value or "").casefold()))
 
     def _place_title(self) -> str | None:
+        self.check_deadline()
         elements = self.driver.find_elements("css selector", selectors.PLACE_TITLE)
         for element in elements:
             text = (getattr(element, "text", "") or element.get_attribute("aria-label") or "").strip()
@@ -221,6 +242,7 @@ class GoogleMapsNavigator:
         return None
 
     def _place_address(self) -> str | None:
+        self.check_deadline()
         elements = self.driver.find_elements("css selector", selectors.PLACE_ADDRESS)
         for element in elements:
             text = (getattr(element, "text", "") or element.get_attribute("aria-label") or "").strip()
@@ -229,6 +251,7 @@ class GoogleMapsNavigator:
         return None
 
     def _candidate_details(self) -> list[dict[str, object]]:
+        self.check_deadline()
         candidates = []
         seen = set()
         for element in self.driver.find_elements(
@@ -409,6 +432,7 @@ class GoogleMapsNavigator:
                     resolution_outcome='IDENTITY_UNVERIFIED')
 
     def _page_evidence(self) -> PageEvidence:
+        self.check_deadline()
         return PageEvidence(
             has_place_tabs=bool(
                 self.driver.find_elements("css selector", selectors.PLACE_TABS)

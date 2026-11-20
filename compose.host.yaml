@@ -1,0 +1,5 @@
+# Optional localhost access for host-side Python development/tests.
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${FNB_POSTGRES_PORT:-15432}:5432"

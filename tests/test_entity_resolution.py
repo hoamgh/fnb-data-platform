@@ -6,7 +6,7 @@ from copy import deepcopy
 import pytest
 
 from fnb_platform.comparison_features import build as features
-from fnb_platform.entity_resolution import DEFAULTS, QUEUE, build, classify, distance_m, name_similarity
+from fnb_platform.entity_resolution import QUEUE, build, distance_m, name_similarity
 
 
 def fixture_rows():
@@ -91,7 +91,10 @@ def test_shared_and_multiple_links_determinism_csv_roundtrip():
     gg.append({**gg[0],'google_identity_value':'google2'})
     li.append({**li[0],'google_identity_value':'google2'})
     t,q,r=run(ov,gg,li)
-    assert set(t['classification'].to_pylist())=={'REVIEW'}
+    # Multiple candidates remain REVIEW; V3 can retain a supported proposal on
+    # the other source's shared identity. Auto-accept still blocks that group.
+    assert {(r['overture_id'],r['google_identity_value']):r['classification'] for r in t.to_pylist()} == {
+        ('ov1','google1'):'REVIEW', ('ov1','google2'):'REVIEW', ('ov2','google1'):'MATCH_CANDIDATE'}
     t2,q2,r2=run(list(reversed(ov)),list(reversed(gg)),list(reversed(li)))
     assert t.to_pylist()==t2.to_pylist() and q==q2 and r==r2
     stream=io.StringIO();w=csv.DictWriter(stream,fieldnames=QUEUE);w.writeheader();w.writerows(q)
@@ -106,14 +109,6 @@ def test_key_loss_rejected():
     with pytest.raises(ValueError):run(ov,gg,li)
 
 
-def test_threshold_boundaries_and_combined_evidence():
-    assert classify(.9,100,False,False,DEFAULTS)=='MATCH_CANDIDATE'
-    assert classify(.59,501,False,False,DEFAULTS)=='REVIEW'
-    assert classify(.59,501,True,False,DEFAULTS)=='NON_MATCH_CANDIDATE'
-    assert classify(1,0,True,False,DEFAULTS)=='REVIEW'
-    assert classify(1,0,False,True,DEFAULTS)=='REVIEW'
-
-
 @pytest.fixture
 def published_features(tmp_path):
     import pyarrow as pa
@@ -126,9 +121,10 @@ def published_features(tmp_path):
     (release/'silver').mkdir(parents=True);(release/'reports').mkdir()
     artifacts={}
     for name, rows in [('silver/google_places.parquet',gg),('silver/source_links.parquet',li)]:
-        pq.write_table(pa.Table.from_pylist(rows),release/name)
+        table=pa.Table.from_pylist(rows,schema=silver.PLACE_SCHEMA if 'google_places' in name else silver.LINK_SCHEMA)
+        pq.write_table(table,release/name)
         from fnb_platform.overture_incremental import _digest
-        artifacts[name]={'sha256':silver.sha(release/name),'rows':len(rows),'logical_sha256':_digest(rows)}
+        artifacts[name]={'sha256':silver.sha(release/name),'rows':len(rows),'logical_sha256':_digest(table.to_pylist())}
     for name,value in [('reports/google_silver_dq_summary.json',json.dumps({'zero_candidate_inventory':[]})),
                        ('reports/google_silver_dq_details.csv','issue_code,overture_id,google_id_kind,google_identity_value,observation_ref,field,detail_json\n')]:
         (release/name).write_text(value,encoding='utf-8');artifacts[name]={'sha256':silver.sha(release/name)}
@@ -158,3 +154,129 @@ def test_publication_atomic_rerun_and_hash_mismatch(published_features,tmp_path)
 def test_existing_independent_decision_not_overwritten():
     ov,gg,li=fixture_rows();li[0]['er_status']='MATCH'
     with pytest.raises(ValueError,match='Independent ER'):run(ov,gg,li)
+
+
+@pytest.mark.parametrize('entrypoint', ['canonical', 'legacy_module', 'script'])
+def test_cli_publishes_canonical_release_and_reuses_it(published_features, tmp_path, entrypoint):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from fnb_platform import entity_resolution as er
+    comparison, _ = published_features
+    out = tmp_path / 'cli'
+    repo = Path(__file__).resolve().parents[1]
+    cli = (['-m', 'fnb_platform.integration.entity_resolution'] if entrypoint == 'canonical'
+           else ['-m', 'fnb_platform.entity_resolution'] if entrypoint == 'legacy_module'
+           else [str(repo / 'scripts/entity_resolution.py')])
+    command = [sys.executable, '-B', *cli, '--comparison-root', str(comparison), '--output-root', str(out)]
+    completed = subprocess.run(command, cwd=repo, text=True, capture_output=True, timeout=45)
+    assert completed.returncode == 0, completed.stderr
+    dest = er.silver.read_active(out)
+    assert dest is not None
+    manifest = er.silver.verify_release(dest)
+    assert manifest['signature']['rule_version'] == 'ov-google-er-proposal-v3-experimental'
+    assert json.loads(completed.stdout)['rows'] == manifest['artifacts']['er_results.parquet']['rows']
+    protected = {p: er.silver.sha(p) for p in out.rglob('*') if p.is_file()}
+    replay = subprocess.run(command, cwd=repo, text=True, capture_output=True, timeout=45)
+    assert replay.returncode == 0, replay.stderr
+    assert er.silver.read_active(out) == dest
+    assert all(er.silver.sha(p) == digest for p, digest in protected.items())
+    for obsolete in (['--version','v2'], ['--baseline-root',str(tmp_path/'obsolete')]):
+        rejected = subprocess.run([*command, *obsolete], cwd=repo, text=True, capture_output=True, timeout=45)
+        assert rejected.returncode == 2
+        assert all(er.silver.sha(p) == digest for p, digest in protected.items())
+    failed = subprocess.run([sys.executable, '-B', *cli, '--comparison-root', str(tmp_path/'missing'),
+                             '--output-root', str(out)], cwd=repo, text=True, capture_output=True, timeout=45)
+    assert failed.returncode != 0
+    assert all(er.silver.sha(p) == digest for p, digest in protected.items())
+
+
+def test_only_canonical_helpers_are_fingerprinted(published_features, tmp_path):
+    from pathlib import Path
+    from fnb_platform.integration import entity_resolution as er, matching_policy, matching_evidence
+    comparison, _ = published_features
+    release, _ = er.publish(comparison, tmp_path/'canonical')
+    signature = er.silver.verify_release(release)['signature']
+    assert signature['rule_version'] == matching_policy.VERSION
+    for module in (er, matching_policy, matching_evidence):
+        assert signature['code_sha256'][str(Path(module.__file__).resolve())] == er.silver.sha(module.__file__)
+    assert not any('entity_resolution_v2' in p or 'entity_resolution_v3' in p for p in signature['code_sha256'])
+    with pytest.raises(TypeError):
+        er.publish(comparison, tmp_path/'obsolete', version='v2')
+    with pytest.raises(TypeError):
+        er.publish(comparison, tmp_path/'obsolete', baseline_root=tmp_path/'baseline')
+
+
+@pytest.mark.parametrize('google_present', [False, True])
+def test_zero_pairs_publish_with_manifest_provenance(tmp_path, google_present):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from fnb_platform import google_silver as s, comparison_features as cf, entity_resolution as er
+    from test_google_silver import make_run, metadata
+    source = tmp_path/'overture'/'state.parquet'
+    source.parent.mkdir()
+    ov, _, _ = fixture_rows()
+    pq.write_table(pa.Table.from_pylist(ov), source)
+    jobs = [dict(source='ov1', result=None, state='PENDING')]
+    raw = make_run(tmp_path, 'google-empty', jobs)
+    places_root = tmp_path/'places'
+    release, _ = s.publish([raw], source, places_root)
+    if google_present:
+        # A valid source observation without any Overture relationship.
+        from test_google_silver import reseal_artifact
+        place = dict(google_id_kind='data_id', google_identity_value='0x1:0x2',
+                     field_provenance_json='{}')
+        reseal_artifact(release, 'silver/google_places.parquet',
+                        pa.Table.from_pylist([place], schema=s.PLACE_SCHEMA))
+    comparison = tmp_path/'comparison'
+    cf.publish(source, places_root, comparison)
+    out = tmp_path/'er'
+    dest, summary = er.publish(comparison, out)
+    table = pq.ParquetFile(dest/'er_results.parquet').read()
+    assert table.num_rows == 0 and table.schema.equals(er.SCHEMA)
+    assert summary['rows'] == 0 and summary['zero_candidate_count'] == 1
+    assert summary['unchanged_zero_candidate_overture_ids'][0]['overture_id'] == 'ov1'
+    pointer = (out/'current.json').read_bytes()
+    checksums = {p: s.sha(p) for p in dest.rglob('*') if p.is_file()}
+    assert er.publish(comparison, out)[0] == dest
+    assert (out/'current.json').read_bytes() == pointer
+    assert checksums == {p: s.sha(p) for p in checksums}
+
+
+@pytest.mark.parametrize('reuse', [False, True])
+@pytest.mark.parametrize('changed_input', ['source', 'comparison_pointer'])
+def test_final_input_guard_preserves_active_release(published_features, tmp_path, reuse, changed_input):
+    from fnb_platform import entity_resolution as er, google_silver as s
+    comparison, source = published_features
+    out = tmp_path/'er'
+    prior, _ = er.publish(comparison, out)
+    previous_pointer = (out/'current.json').read_bytes()
+    prior_hashes = {p:s.sha(p) for p in prior.rglob('*') if p.is_file()}
+    if not reuse:
+        # A new pinned comparison snapshot selects a fresh ER destination,
+        # retaining the same source data and relationship evidence.
+        active = s.read_active(comparison)
+        manifest_path = active/'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['signature']['test_revision'] = 2
+        manifest_path.write_text(s.dump(manifest))
+        (comparison/'current.json').write_text(s.dump(dict(
+            release_id=active.name, manifest_sha256=s.sha(manifest_path))))
+    target = source if changed_input == 'source' else comparison/'current.json'
+    original = target.read_bytes()
+    def change(phase):
+        if phase == 'before_pointer_replace':
+            target.write_bytes(original + b' ')
+    with pytest.raises(ValueError, match='Input changed before pointer activation'):
+        er.publish(comparison, out, fault=change)
+    assert (out/'current.json').read_bytes() == previous_pointer
+    assert s.read_active(out) == prior
+    assert prior_hashes == {p:s.sha(p) for p in prior_hashes}
+    assert not (out/'.publish.lock').exists()
+    assert len(list((out/'releases').iterdir())) == (1 if reuse else 2)
+    target.write_bytes(original)
+    recovered, _ = er.publish(comparison, out)
+    pointer = (out/'current.json').read_bytes()
+    assert (recovered == prior) == reuse
+    assert er.publish(comparison, out)[0] == recovered
+    assert (out/'current.json').read_bytes() == pointer
