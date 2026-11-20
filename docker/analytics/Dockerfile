@@ -23,3 +23,11 @@ FROM superset AS superset-duckdb
 USER root
 RUN uv pip install --python /app/.venv/bin/python --no-cache duckdb==1.5.5 duckdb-engine==0.17.0
 USER superset
+
+# On-demand UI checks; the mentor needs neither Python nor Chrome on the host.
+FROM mcr.microsoft.com/playwright/python:v1.42.0-jammy AS verification
+ENV PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
+WORKDIR /app
+RUN pip install --no-cache-dir playwright==1.42.0
+COPY scripts/verify_superset.py /app/scripts/verify_superset.py
+ENTRYPOINT ["python", "-B", "/app/scripts/verify_superset.py"]

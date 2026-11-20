@@ -139,7 +139,7 @@ def verify(url, output, chrome):
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
-                executable_path=str(chrome),
+                **({"executable_path": str(chrome)} if chrome else {}),
                 headless=True,
                 args=[
                     "--disable-extensions",
@@ -403,7 +403,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--chrome",
         type=Path,
-        default=Path("C:/Program Files/Google/Chrome/Application/chrome.exe"),
+        default=os.environ.get("FNB_CHROME_BIN"),
+        help="Optional browser override; Docker uses its bundled Chromium",
     )
     args = parser.parse_args()
     verify(args.url.rstrip("/"), args.output, args.chrome)

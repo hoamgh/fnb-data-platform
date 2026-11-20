@@ -2,7 +2,7 @@ param(
  [Parameter(Mandatory=$true)][ValidateSet('fnb_overture_ingestion','fnb_google_crawl','fnb_integration_gold')][string]$DagId,
  [Parameter(Mandatory=$true)][string]$ConfigFile,
  [string]$ProjectName='fnb-platform',
- [string]$ResultsRoot=(Join-Path $env:TEMP ('fnb-airflow01-'+[guid]::NewGuid().ToString('N')))
+ [string]$ResultsRoot=(Join-Path ([IO.Path]::GetTempPath()) ('fnb-airflow01-'+[guid]::NewGuid().ToString('N')))
 )
 $ErrorActionPreference='Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)

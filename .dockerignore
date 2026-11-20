@@ -29,7 +29,18 @@
 **/*.sqlite*
 **/*.db
 **/*.duckdb
+**/*.duckdb.wal
+**/target/**
+**/logs/**
+**/dbt_packages/**
+**/.user.yml
 **/cookies*.json
+**/Cookies
+**/Login Data*
+**/Local State
+**/*.local.*
+**/*.log
+**/*.jsonl
 **/gcp-credentials.json
 **/.auth/**
 **/.env*

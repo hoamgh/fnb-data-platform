@@ -31,6 +31,9 @@ DATA_CACHE_CONFIG = {
 }  # Never mix cached KPI values across atomic release switches.
 TALISMAN_CONFIG = {
     "force_https": False,
+    # Talisman otherwise overrides Flask's SESSION_COOKIE_SECURE=False.
+    # Docker's internal HTTP hostname needs the same local-session behavior.
+    "session_cookie_secure": False,
     "content_security_policy": {
         "default-src": ["'self'"],
         "script-src": ["'self'", "'unsafe-eval'"],

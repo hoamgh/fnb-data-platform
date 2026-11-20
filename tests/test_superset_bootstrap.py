@@ -167,6 +167,7 @@ def test_native_tabs_cover_each_selected_chart_once(assets, bootstrap):
 
 def test_map_uses_registered_metric_and_bounded_native_dataset(assets):
     import json
+    from urllib.parse import urlsplit
 
     chart = next(
         v
@@ -176,6 +177,12 @@ def test_map_uses_registered_metric_and_bounded_native_dataset(assets):
     params = chart["params"]
     if isinstance(params, str):
         params = json.loads(params)
+    # Retain the low-clutter M5 basemap. Verification must use the real local UI
+    # origin via the Superset network namespace, not change the visual for tests.
+    tile = urlsplit(params["mapbox_style"].removeprefix("tile://"))
+    assert tile.scheme == "https" and tile.hostname == "tiles.stadiamaps.com"
+    assert "/alidade_smooth/" in tile.path
+    assert not tile.query and tile.username is None and tile.password is None
     dataset = next(
         v
         for k, v in assets.items()
@@ -206,7 +213,7 @@ $ErrorActionPreference='Stop'
 $ast=[System.Management.Automation.Language.Parser]::ParseFile({quoted(root / 'scripts/Invoke-DuckDbPilot.ps1')},[ref]$null,[ref]$null)
 $functions=$ast.FindAll({{param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]}},$true)
 if(@($functions|Where-Object{{$_.Name -in 'Python','Docker'}}).Count){{throw 'Native executable name is shadowed'}}
-foreach($function in $functions|Where-Object{{$_.Name -in 'Invoke-PythonCommand','Invoke-DockerCommand','Save-State','Step'}}){{. ([scriptblock]::Create($function.Extent.Text))}}
+foreach($function in $functions|Where-Object{{$_.Name -in 'Invoke-DockerCommand','Read-Settings','Setting','Restore-Environment','Assert-Ports','Save-State','Step'}}){{. ([scriptblock]::Create($function.Extent.Text))}}
 $run={quoted(tmp_path)}
 $checkpoint=Join-Path $run 'checkpoint.json'
 $state=@{{stages=@{{}};status='RUNNING'}}
@@ -235,53 +242,115 @@ def test_runner_calls_native_executables_and_rejects_nonzero_exit(native_runner)
         """
 function Python {throw 'Unexpected Python function dispatch'}
 function Docker {throw 'Unexpected Docker function dispatch'}
-Invoke-PythonCommand -Arguments @('-B','-c','print("NATIVE_PYTHON_OK")')
 Invoke-DockerCommand -Arguments @('--version')
 $failed=$false
-try {Invoke-PythonCommand -Arguments @('-B','-c','import sys;sys.exit(7)')}
-catch {if($_.Exception.Message -notmatch '7'){throw};$failed=$true}
+try {Invoke-DockerCommand -Arguments @('--fnb-invalid-flag')}
+catch {if($_.Exception.Message -notmatch 'Docker failed'){throw};$failed=$true}
 if(-not $failed){throw 'Nonzero native exit was accepted'}
 """
     )
-    assert "NATIVE_PYTHON_OK" in result.stdout and "Docker version" in result.stdout
+    assert "Docker version" in result.stdout
 
 
-def test_runner_secret_stage_is_native_and_preserves_existing_secrets(
-    native_runner, tmp_path
-):
-    import base64
-
-    result = native_runner(
+def test_runner_settings_preserve_literal_values_without_executing_them(native_runner):
+    native_runner(
         """
-$secrets=Join-Path $run 'secrets'
-$action={Invoke-PythonCommand -Arguments @('-B','scripts/init_analytics_secrets.py','--directory',$secrets);& ./scripts/Initialize-FnbRuntime.ps1 -SecretsDirectory $secrets}
-Step 'SECRETS' $action
-$before=@(Get-ChildItem $secrets -File|Sort-Object Name|Get-FileHash|ForEach-Object Hash)
-Step 'SECRETS' $action -Always
-$after=@(Get-ChildItem $secrets -File|Sort-Object Name|Get-FileHash|ForEach-Object Hash)
-if($before.Count -ne 9 -or ($before -join ',') -ne ($after -join ',')){throw 'Missing or replaced secrets'}
-if($state.stages.SECRETS -ne 'PASS'){throw 'Secret stage did not pass'}
+$path=Join-Path $run 'settings.env'
+@('# comment','FNB_SUPERSET_PORT=18101','FNB_PATH="folder with spaces"','FNB_LITERAL=$(throw bad)','IGNORED=value')|Set-Content $path
+$settings=Read-Settings $path
+if($settings.FNB_PATH -ne 'folder with spaces' -or $settings.FNB_LITERAL -ne '$(throw bad)' -or $settings.Count -ne 3){throw 'Settings were evaluated or parsed incorrectly'}
 """
     )
-    values = [p.read_bytes() for p in (tmp_path / "secrets").iterdir()]
-    if any(value in (result.stdout + result.stderr).encode() for value in values):
-        pytest.fail("Secret stage exposed credential values")
-    assert (
-        len(base64.urlsafe_b64decode((tmp_path / "secrets/fernet_key").read_bytes()))
-        == 32
+
+
+def test_runner_rejects_occupied_ports_before_building(native_runner):
+    native_runner(
+        """
+$project='fixture'
+function Invoke-DockerCommand {$global:LASTEXITCODE=0}
+$listener=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0)
+$listener.Start()
+try {
+    $port=$listener.LocalEndpoint.Port
+    $rejected=$false
+    try {Assert-Ports @{superset=$port}}catch{if($_.Exception.Message -notmatch 'busy'){throw};$rejected=$true}
+    if(-not $rejected){throw 'Occupied port accepted'}
+}finally{$listener.Stop()}
+"""
     )
+
+
+def test_environment_roundtrip_keeps_dotenv_defaults_stable_in_one_process(native_runner):
+    native_runner(
+        """
+$settings=@{FNB_DX_TEST_VOLUME='fixture-volume';FNB_DX_TEST_INPUT='./config';FNB_DX_TEST_PORT='18103'}
+$original=@{}
+foreach($name in $settings.Keys){$original[$name]=[Environment]::GetEnvironmentVariable($name);Remove-Item -LiteralPath ('Env:'+$name) -ErrorAction SilentlyContinue}
+try {
+    $fingerprints=@()
+    foreach($attempt in 1..2){
+        $fingerprints+=(@($settings.Keys|Sort-Object|ForEach-Object{Setting $_}) -join '|')
+        $prior=@{}
+        foreach($name in $settings.Keys){$prior[$name]=[Environment]::GetEnvironmentVariable($name);[Environment]::SetEnvironmentVariable($name,'runtime-value')}
+        Restore-Environment $prior
+        foreach($name in $settings.Keys){if(Test-Path -LiteralPath ('Env:'+$name)){throw 'Absent environment became an empty override'}}
+    }
+    if($fingerprints[0] -ne $fingerprints[1] -or $fingerprints[0] -notmatch 'fixture-volume'){throw 'Rerun configuration drifted'}
+    [Environment]::SetEnvironmentVariable('FNB_DX_TEST_EMPTY','temporary')
+    Restore-Environment @{FNB_DX_TEST_EMPTY=''}
+    if([Environment]::GetEnvironmentVariable('FNB_DX_TEST_EMPTY') -ne ''){throw 'Explicit empty value was not preserved'}
+}finally{Restore-Environment $original;Remove-Item Env:FNB_DX_TEST_EMPTY -ErrorAction SilentlyContinue}
+"""
+    )
+
+
+def test_frozen_resume_rejects_changed_export_before_touching_checkpoint():
+    import hashlib
+    import json
+    import re
+    import shutil
+    import subprocess
+    import uuid
+
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell required for frozen-source resume regression")
+    root = Path(__file__).resolve().parents[1]
+    runner = root / "scripts/Invoke-DuckDbPilot.ps1"
+    inventory = runner.read_text().split("$files=@(", 1)[1].split(")\n", 1)[0]
+    paths = re.findall(r"'([^']+)'", inventory)
+    run_name = "resume-guard-" + uuid.uuid4().hex[:12]
+    owned = root / ".local/mentor-verification" / run_name
+    source = owned / "source"
+    hashes = []
+    for name in paths:
+        target = source / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"owned resume fixture")
+        hashes.append({"Hash": hashlib.sha256(target.read_bytes()).hexdigest()})
+    (owned / "source-identity.json").write_text(json.dumps({"revision": "fixture", "files": hashes}))
+    evidence = owned / "verification.json"
+    before = b'{"status":"FAIL","fixture_only":true,"stages":{"FIRST_SETUP":"PASS"}}'
+    evidence.write_bytes(before)
+    (source / paths[0]).write_bytes(b"changed owned fixture")
+    result = subprocess.run(
+        [pwsh, "-NoProfile", "-File", str(runner), "-FreshClone", "-ResumeFresh", "-RunName", run_name],
+        cwd=root, capture_output=True, text=True, timeout=25,
+    )
+    assert result.returncode != 0 and "Frozen source changed" in result.stdout + result.stderr
+    assert evidence.read_bytes() == before
 
 
 def test_runner_writes_actual_failure_to_stage_log(native_runner, tmp_path):
     native_runner(
         """
-try {Step 'NEGATIVE' {Invoke-PythonCommand -Arguments @('-B','-c','import sys;sys.exit(9)')}}
+try {Step 'NEGATIVE' {throw 'fixture step failure'}}
 catch {if($_.Exception.Message -notmatch 'Stage NEGATIVE failed'){throw}}
 if($state.stages.NEGATIVE -ne 'FAIL'){throw 'Native failure was not recorded'}
 """
     )
     logs = list(tmp_path.glob("NEGATIVE-*.log"))
-    assert len(logs) == 1 and "ERROR: Python failed, exit 9" in logs[0].read_text(
+    assert len(logs) == 1 and "ERROR: fixture step failure" in logs[0].read_text(
         encoding="utf-8-sig"
     )
 

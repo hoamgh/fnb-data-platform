@@ -1,6 +1,7 @@
 """Invented, non-PII demo sources; never substitute these for real admission."""
 
 from datetime import datetime, timezone
+from collections import Counter
 from pathlib import Path
 import json
 import os
@@ -105,6 +106,7 @@ def context(output):
         "gold_attached": folder / "attached.parquet",
         "gold_unmatched": folder / "unmatched.parquet",
         "google_places": folder / "places.parquet",
+        "demo_decisions": folder / "decisions.parquet",
     }
     with duckdb.connect(str(folder / "business.duckdb"), read_only=True) as con:
         for name in wh.MARTS:
@@ -112,7 +114,7 @@ def context(output):
             con.execute(
                 "copy (select * from business_analytics."
                 + name
-                + ") to '"
+                + " order by all) to '"
                 + str(path).replace("'", "''")
                 + "' (format parquet)"
             )
@@ -128,15 +130,26 @@ def context(output):
         reference_quality_status="SYNTHETIC",
     )
     expected = dict(
-        canonical_store_count=2,
-        accepted_mapping_count=1,
-        source_only_store_count=1,
-        source_mapping_rows=3,
-        unresolved_mapping_count=1,
-        current_logical_reviews=4,
-        attached_reviews=2,
-        unmatched_reviews=2,
-        category_validation_counts={"PROVISIONAL_SOURCE_AGREEMENT": 1, "PENDING": 1},
+        canonical_store_count=len(rows["stores"]),
+        accepted_mapping_count=sum(r["source"] == "google" for r in rows["mappings"]),
+        source_only_store_count=sum(
+            r["identity_status"] == "SOURCE_ONLY" for r in rows["stores"]
+        ),
+        source_mapping_rows=len(rows["mappings"]),
+        unresolved_mapping_count=sum(
+            r["effective_status"] not in {"AUTO_ACCEPTED", "HUMAN_ACCEPTED"}
+            for r in rows["decisions"]
+        ),
+        current_logical_reviews=len(rows["attached"]) + len(rows["unmatched"]),
+        attached_reviews=len(rows["attached"]),
+        unmatched_reviews=len(rows["unmatched"]),
+        category_validation_counts=dict(
+            Counter(r["category_validation_status"] for r in rows["stores"])
+        ),
+        er_candidate_pairs=len(rows["decisions"]),
+        er_decision_counts=dict(
+            Counter(r["effective_status"] for r in rows["decisions"])
+        ),
         area_reference=dict(area_business_key=area_id, **reference),
         synthetic_demo=True,
     )
@@ -283,6 +296,10 @@ def create_sources(folder):
         unmatched=reviews[2:],
         places=places,
         areas=areas,
+        decisions=[
+            dict(overture_id="synthetic-a", effective_status="AUTO_ACCEPTED"),
+            dict(overture_id="synthetic-b", effective_status="REVIEW_REQUIRED"),
+        ],
     )
     for name, rows in datasets.items():
         pq.write_table(pa.Table.from_pylist(rows), folder / (name + ".parquet"))

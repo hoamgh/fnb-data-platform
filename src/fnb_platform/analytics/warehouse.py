@@ -381,6 +381,8 @@ def build(
         *sorted(PROJECT.rglob("*.sql")),
         *sorted(PROJECT.rglob("*.yml")),
     ]
+    if demo:
+        code.append(Path(__file__).with_name("demo.py"))
     publication.validate_publication_paths(
         output / "releases",
         [*([] if demo else [gold, analytics]), *context["pins"], *code],

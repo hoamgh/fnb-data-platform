@@ -44,6 +44,7 @@ def chart_ids(layout, node_id):
 def configure():
     # ORM imports require Superset's initialized encrypted-field factory.
     from flask import g
+    from superset.commands.chart.importers.dispatcher import ImportChartsCommand
     from superset.commands.dashboard.importers.dispatcher import ImportDashboardsCommand
     from superset.commands.importers.v1.utils import get_contents_from_bundle
     from superset.models.core import Database
@@ -99,6 +100,13 @@ def configure():
                     )
             contents[name] = yaml.safe_dump(config, allow_unicode=True)
     ImportDashboardsCommand(contents, overwrite=True).run()
+    # Superset 6 overwrites the dashboard but deliberately retains existing child
+    # charts. Import the same native charts explicitly so reruns apply bundle fixes.
+    chart_contents = {k: v for k, v in contents.items() if not k.startswith("dashboards/")}
+    metadata = yaml.safe_load(chart_contents["metadata.yaml"])
+    metadata["type"] = "Slice"
+    chart_contents["metadata.yaml"] = yaml.safe_dump(metadata)
+    ImportChartsCommand(chart_contents, overwrite=True).run()
 
     database = (
         db.session.query(Database)

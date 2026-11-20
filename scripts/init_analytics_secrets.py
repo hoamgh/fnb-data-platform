@@ -11,7 +11,13 @@ if __name__ == "__main__":
         type=Path,
         default=Path(__file__).resolve().parents[1] / ".auth/fnb",
     )
-    target = parser.parse_args().directory
+    parser.add_argument(
+        "--compose-secrets",
+        action="store_true",
+        help="Read-only files shared across container UIDs; keep the host directory private",
+    )
+    args = parser.parse_args()
+    target = args.directory
     target.mkdir(parents=True, exist_ok=True)
     for name in [
         "admin_password",
@@ -23,7 +29,7 @@ if __name__ == "__main__":
         try:
             with path.open("x", encoding="utf-8") as stream:
                 stream.write(secrets.token_hex(32))
-            path.chmod(0o600)
+            path.chmod(0o444 if args.compose_secrets else 0o600)
         except FileExistsError:
             pass
     print("Analytics secrets ready; no credential values printed.")

@@ -1,137 +1,122 @@
 # HCMC F&B Data Platform
 
-A Khánh Hội pilot integrating Overture and Google data into a traceable F&B catalog. M5 serves existing published Gold through a dimensional warehouse and Apache Superset; it does not rerun collection, identity matching or Gold integration.
-
-## Architecture
+Integrate Overture and Google observations into a reproducible F&B catalog for the Khánh Hội pilot. The project preserves source provenance, separates uncertain identities and reconciles reviews before exposing business analytics. Canonical records describe observed data; they are not a census or independently verified ground truth.
 
 ```mermaid
 flowchart LR
-    A["Published Gold Parquet"] --> M["Existing business marts · dbt"]
-    A --> D["Dimensional models · dbt / DuckDB"]
-    M --> D
-    D --> L["Independent immutable DuckDB serving snapshot"]
-    L --> S["Apache Superset · read-only DuckDB / Market Overview"]
-    P["PostgreSQL · Superset metadata / Airflow only"] -.-> S
+    S[Overture + Google] --> B[Bronze / Silver Parquet]
+    B --> E[Canonical ER V3 + optional Human Review]
+    E --> G[Published Gold Parquet]
+    G --> D[DuckDB + dbt: dimensions, facts, marts]
+    D --> V[Immutable read-only serving snapshot]
+    V --> U[Superset: 20 charts / 3 tabs]
 ```
 
-Upstream flow: Overture + Google → Bronze → Silver → canonical ER → optional Human Review → Gold. Upstream integration changes are outside this M5 setup.
+PostgreSQL serves Superset metadata and the separate Airflow/crawler state databases. DuckDB is the analytics warehouse. Bronze/Silver/Gold remain Parquet releases with manifests and SHA256. SQL owns KPI definitions; Superset reads the shared DuckDB views.
 
-SQL/dbt owns dimensions, facts, marts and shared BI views. dbt builds/tests a working DuckDB database; publication copies it to an immutable serving filename after hash, grain and reconciliation checks. Superset opens the snapshot read-only. Refresh updates its URI explicitly; existing readers can finish on the retained old file. Parquet Bronze/Silver/Gold and their manifests remain unchanged. There is no DuckDB server/port, chart framework, Redis or Celery.
+## Prerequisites
 
-**Verified:** isolated Demo and Real deployments passed Docker startup, dbt, 20 native charts/3 tabs, street-map tiles, reads during/after two refreshes, dbt Docs and three Airflow DAG imports/serialization. PostgreSQL analytics transport has been retired; existing historical databases/volumes remain untouched.
+- Git, PowerShell **7.2+** (`pwsh`), Docker Desktop with Linux containers and Docker Compose v2.
+- Internet for pinned image/dependency downloads and street-map tiles.
+- No Python, conda, dbt or Chrome installation is required on the host for BI setup. All jobs and browser checks run in Docker.
+- Windows is the development host. Linux-host setup is **NOT_VERIFIED**.
 
-## Tech stack
+## Quick Start — public synthetic Demo
 
-Python 3.12, Parquet/PyArrow, canonical ER, dbt-core 1.11.17, dbt-duckdb 1.11.1, DuckDB 1.5.5, duckdb-engine 0.17.0, Superset 6.0.0, Airflow 2.10.5 and PostgreSQL 15 for service metadata/state. Dockerfiles pin dependency versions; no live crawling is part of verification.
-
-## Business questions and models
-
-- How many canonical records are observed, by area, category and source association?
-- Where are they located, and what are their ratios against sourced area/population references?
-- How many logical reviews exist, which have accepted store associations, and how do their ratings/dates vary?
-
-[Dimensional modeling](docs/DIMENSIONAL_MODELING.md) defines the processes and grains. [BRD v1.5](docs/01_BRD.md) keeps data quality separate from business facts.
-
-| Object | Grain |
-|---|---|
-| `dim_store`, `dim_category`, `dim_area`, `dim_date` | One current store, analytical category, sourced area, or day |
-| `fact_store_snapshot` | One canonical store × Gold release |
-| `fact_review` | One unique logical review, including unmatched reviews |
-| `bridge_store_source` | One accepted source mapping × Gold release |
-
-Seven models live only in `pipelines/dimensional_analytics`; three distinct marts remain in `pipelines/business_analytics`. DuckDB stores these tables and the shared `bi` views. No dimensions/facts are added for ER/DQ reporting. Failed builds preserve the old snapshot. Logical reviews without an accepted canonical association keep their Google identity and NULL canonical key.
-
-## Verified pilot results
-
-Gold release: `5d7915f7313e0da6dc10f1bb`.
-
-| Metric | Observed result |
-|---|---:|
-| Overture-anchored canonical records | 725 |
-| Accepted Google links / source-only records | 302 / 423 |
-| Accepted source mappings / unresolved candidate pairs | 1,027 / 174 |
-| Logical reviews | 10,139 |
-| Attached / unmatched reviews | 6,942 / 3,197 |
-| Gold category provisional / pending | 267 / 458 |
-
-These are catalog records, not a census. Accepted links are machine decisions, not independently human-verified ground truth. Google aggregate Place ratings and collected individual review ratings remain separate metrics.
-
-## Setup
-
-### Prerequisites
-
-- Docker Desktop with Linux containers; PowerShell 7.2+ on Windows (verified host) for the resumable runner. Full Airflow/browser image builds need more RAM/time than the BI-only demo.
-- For browser verification: Python 3.11+ with `playwright==1.42.0` and installed Google Chrome at the verifier's default path, or run the verifier separately with `--chrome`.
-- Demo uses invented, non-PII sources generated from code. Real mode requires authorized Gold, Places/Reviews provenance, business marts and demographic releases; these are **not shipped in Git**.
-
-`compose.analytics.yaml` defines DuckDB/dbt, Superset, dbt Docs and metadata-only PostgreSQL. `compose.yaml` defines pipeline/Airflow/browser runtimes. The runner uses separate project names, secrets, outputs and ports. Existing volumes and credentials are never reset.
-
-### Configure and start
+From the repository root:
 
 ```powershell
-# Copy only when .env is absent; edit local ports if needed.
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-python -m pip install playwright==1.42.0
-# All builds/startup/verification below run manually and preserve checkpoints/logs.
-pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Mode Demo -RunName demo-02 -Port 18091 -PostgresPort 15436 -DocsPort 18084
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1
 ```
 
-`.env.example` contains ports, never credentials. The new runner generates isolated secrets under `.local/duckdb-final/<run>/secrets`, never overwrites existing files and mounts them as Docker secrets. Only the Superset metadata database is provisioned; no PostgreSQL analytics tables or loader are used. Existing historical databases remain intact.
+The runner creates `.env` from [.env.example](.env.example) only if absent, validates Docker and available ports, builds the required images, generates missing secrets, builds/tests DuckDB, initializes Superset metadata and imports the data-free native dashboard bundle. Logs, checkpoints and generated data stay in `.local/duckdb-final/mentor-demo/`. Rerun the identical command to recover/resume. Changed source/configuration requires a new `-RunName`; previous runs are preserved.
 
-The analytics Dockerfile supplies a warehouse target and `superset-duckdb`, with pinned DuckDB/duckdb-engine and a PostgreSQL driver for Superset metadata. No additional Dockerfile is needed. Demo data has 2 invented stores/4 reviews and visibly marks all catalog/review/reference metrics SYNTHETIC. It does not ship Google identities, review text or fake human decisions. Demo counts must never be presented as pilot KPIs.
+Demo uses invented non-PII stores/reviews/reference records generated by `src/fnb_platform/analytics/demo.py`. Metrics are derived from these records, never filled with the real pilot's KPIs. The dashboard visibly says SYNTHETIC. Demo does not load private Gold or crawl Google; it has only two example stores, not the 725-record pilot.
 
-Demo opens at `http://127.0.0.1:18091` and its dbt Docs at `http://127.0.0.1:18084`. To inspect the real 725-record pilot, use Real mode below. Each run has its own `portfolio_admin` password file under `.local/duckdb-final/<run>/secrets/superset_admin_password`. Choose unused ports when running multiple projects; the runner's explicit port arguments select them.
+| Developer UI | Default URL | Availability |
+|---|---|---|
+| Superset | http://127.0.0.1:18101/superset/dashboard/hcmc-fnb-market-overview/ | After setup PASS |
+| dbt Docs / Lineage | http://127.0.0.1:18102/ | After setup PASS; dimensional project by default |
+| Airflow | http://127.0.0.1:18103/ | Only with explicit `-WithRuntime`; not started for BI Demo |
 
-### Real releases and full pipeline mode
-
-Restore authorized publications into `fnb-platform_demo_outputs`, preserving their recorded `/demo/...` paths. Business marts mount from `.local/m3/dashboard` at `/business-input`; the demographic reference mounts from `output/area-demographics-silver-v1` at `/area-input`. Keep manifests, upstream Places/Reviews manifests and pinned artifacts together. Runner defaults describe the verified local pilot; pass its named release/hash parameters for another compatible snapshot. Missing or mismatched inputs are rejected, never synthesized.
+Superset username is `portfolio_admin`. Copy its password locally without printing it:
 
 ```powershell
-pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Mode Real -RunName m5-real-01 -Port 18092 -PostgresPort 15437 -DocsPort 18085
+(Get-Content -Raw .\.local\duckdb-final\mentor-demo\secrets\superset_admin_password).Trim() | Set-Clipboard
 ```
 
-This manual Real-only command builds images, checks real pinned admission, runs dbt/tests, publishes DuckDB snapshots, imports the same 20-chart/3-tab bundle and checks the dashboard before/during/after a second refresh. It reuses published Gold and does not repeat Demo. Optional `-WithRuntime` also builds isolated pipeline/browser/Airflow images, runs synthetic browser checks, starts Airflow and verifies three DAGs import/serialize; it is not required for BI sign-off. Neither mode runs a live crawler or rebuilds Gold. Logs/checkpoints/results stay under `.local/duckdb-final/<run>`. Same command resumes; changed source/options require another run name.
+Set ports in `.env` before setup if already occupied; explicit `-Port`, `-DocsPort`, `-PostgresPort` and `-AirflowPort` override them. Each `-RunName` gets an independent Compose project, credentials, metadata volume, output directory and image tags. Only PostgreSQL metadata, Superset and dbt Docs stay running. Build/dbt/browser-verification jobs are on-demand; crawler/Airflow are not started by default.
 
-Full ingestion is separate: provide licensed source snapshots, scope/crawl limits and explicit release pins in `config/airflow/*.example.json`, and set `FNB_INPUT_ROOT` before creating the runtime. Replay entrypoint, after replacing the example with a real admitted config:
+## Your own data / authorized Real pilot
+
+Demo is publicly reproducible. Real mode needs authorized existing publications, which are not shipped in Git. Keep immutable manifests, upstream provenance and the exact recorded container paths together; do not edit historical manifests to relocate them.
+
+Configure `.env`:
+
+- `FNB_DEMO_VOLUME`: named volume holding pipeline publications, mounted at `/demo` read-only for BI.
+- `FNB_BUSINESS_INPUT_ROOT`, `FNB_DEMOGRAPHICS_INPUT_ROOT`: host publication roots mounted at `/business-input` and `/area-input`.
+- The six `FNB_*_RELEASE` / `FNB_*_MANIFEST_SHA256` entries: explicit container release paths and their manifest hashes. All are mandatory in Real mode; there is no implicit latest selection or Demo fallback.
 
 ```powershell
-pwsh -File .\scripts\Invoke-FnbDag.ps1 -ProjectName fnb-duckdb-final-01-runtime -DagId fnb_integration_gold -ConfigFile .local/pinned-integration.json
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Mode Real -RunName my-real-01
 ```
 
-Ingestion DAGs are `fnb_overture_ingestion` and `fnb_google_crawl`; integration consumes their explicit published handoffs. Existing CLI scripts/runners support checkpoints/replay. Live Google crawling may require login/session and permission; default live-crawl/download flags remain disabled. Do not assume a clean clone grants source access or automatically supplies cookies.
+This runs admission, dimensional dbt build/tests, snapshot publication, Superset import and read checks before/during/after refresh. It reuses the three published business marts and never rebuilds upstream Gold. A successful build publishes an independent immutable DuckDB filename; Superset reconnects to its exact read-only URI. Old snapshots remain available to existing readers.
 
-This package verifies offline replay, runtime/browser smoke and analytics, not live ingestion. The seven pending crawler/smoke changes are deliberately excluded: the Airflow live-crawl acceptance helper and PostgreSQL incremental-window integration still require that separately reviewed change set. Their dependent tests remain local rather than being packaged against an incompatible crawler API. Use the public Demo or authorized published inputs for the reproducible workflow below.
+The warehouse reuses four dimensions (`store`, `category`, `area`, `date`), `fact_store_snapshot`, `fact_review` and `bridge_store_source`; no additional matching happens here. See [Dimensional Modeling](docs/DIMENSIONAL_MODELING.md) for grains, measures and source-to-target rules, and [BRD](docs/01_BRD.md) for business scope.
 
-### Developer URLs and dbt lineage
-
-After the commands above report PASS, Real Superset opens at **http://127.0.0.1:18092/superset/dashboard/hcmc-fnb-market-overview/** and Real dbt Docs at **http://127.0.0.1:18085/**. Demo uses 18091/18084 as described above. Airflow with `-WithRuntime` uses **http://127.0.0.1:18082/**. Superset user is `portfolio_admin`; Airflow user is `demo`. Password files stay in the isolated run's secret directory. These are localhost services.
-
-Switch docs from repository root:
+Full source collection is separate from BI setup. Start orchestration only when needed:
 
 ```powershell
-pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -RunName m5-real-01 -Docs business_analytics -Port 18092 -PostgresPort 15437 -DocsPort 18085
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -RunName mentor-demo -WithRuntime
 ```
 
-Valid projects: `dimensional_analytics`, `business_analytics`, `gold_staging`, `area_enrichment`; they remain separate. Profiles and `FNB_WAREHOUSE_DUCKDB`/`FNB_DBT_DATABASE` are selected automatically. Docs catalog generation uses a copy of the build DB, never a writable serving snapshot. Gold/Area docs require those projects' actual build artifacts; Area discovers the checksum-pinned publication under `output/area-enrichment-staging-v1` read-only; `FNB_AREA_DBT_RELEASE` may explicitly select another mounted release. No DuckDB path/profile edits are needed. Missing artifacts produce an explicit error; no synthetic lineage substitutes for a real build.
+Use a new run name when enabling `-WithRuntime` after a completed BI-only run, because execution options are fingerprinted. Copy the three `config/airflow/*.example.json` files into `.local/`, replace placeholders with licensed inputs, explicit release IDs/hashes, campaign ID and bounded limits, then set `FNB_INPUT_ROOT` before starting the runtime. The DAGs publish Overture Bronze/Silver, Google Places/Reviews Silver, then Comparison → ER → Category → Mapping → Gold → dbt. Human decisions are retained; unresolved links remain separate.
 
-### Verify and stop
+The existing replay entrypoint accepts an admitted config:
 
 ```powershell
-# Read .local/duckdb-final/m5-real-01/verification.json; require actual PASS.
-# Rerun the identical command to resume/verify; choose a new name if source changed.
-pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Mode Real -RunName m5-real-01 -Port 18092 -PostgresPort 15437 -DocsPort 18085
-# Stop only the isolated BI project; never delete volumes.
-docker compose --project-name fnb-duckdb-m5-real-01 -f compose.analytics.yaml stop superset dbt-docs postgres
+pwsh -File .\scripts\Invoke-FnbDag.ps1 -ProjectName fnb-duckdb-my-runtime-runtime -DagId fnb_integration_gold -ConfigFile .\.local\pinned-integration.json
 ```
 
-Tests use synthetic fixtures and owned temporary schemas. Install the project's test/dbt dependencies to run analytics tests explicitly; the small default pytest selection is not M5 coverage. Snapshot tests cover rejected corruption, unique grains, retained unmatched reviews, read-only access, failed-refresh rollback and concurrent processes.
+Use the project created by your own `-RunName my-runtime -WithRuntime`. `Invoke-FnbDag.ps1` executes `airflow dags test`; it is not a scheduled DagRun. Google live collection uses `scripts/google_live_workers.py`, requires explicit `--operator-submit`, authorized catalog, bounded `--limit/--workers/--max-reviews/--max-scrolls/--per-store-seconds/--total-seconds`, and possibly an operator-owned browser profile. Its live containment implementation explicitly requires Windows; it is not a verified Linux-container crawler. Seven pending crawler/smoke changes and the live acceptance helper are intentionally outside this package. Do not assume Docker BI setup enables unattended full crawling or supplies sessions. Once authorized upstream releases exist, Real mode refreshes BI as above.
 
-**Evidence:** public synthetic `demo-02` and Real-only `m5-real-01` passed in isolated projects. Real Gold `5d7915f7313e0da6dc10f1bb` produced 725 stores, 302 accepted-linked, 423 source-only, 1,027 source mappings and 10,139 logical reviews (6,942 attached / 3,197 unmatched). The 7 dimensional models passed 41 dbt tests; focused container regression passed 55 tests with 8 platform/browser-dependent skips. The Real browser verifier passed 27 checks before, during and after refresh, covering all 20 charts/3 tabs, street tiles and GRID/DETAIL. The second refresh reused the verified bundle/snapshot, preserving counts and logical content. Read-only checks verified table hashes, seven model grains, no Google mapping fanout and retained unmatched Google review identities. dbt Docs served the 7-model manifest and catalog successfully. Demo separately builds the 3 business marts with 8 tests; Real reuses its pinned published marts. Local evidence is ignored by Git; logs and databases are never distributed.
+## dbt Docs, restart and safe stop
 
-Observed `m5-real-01` serving samples: Superset 252.1 MiB; metadata PostgreSQL 122.5 MiB; query-probe process peak 80.06 MiB. Five fresh-connection DuckDB samples per query were about 52–139 ms. Container samples are not isolated peaks; the probe includes connection open/close.
+Profiles, `FNB_WAREHOUSE_DUCKDB` and `FNB_DBT_DATABASE` are selected automatically. Switch the current Demo to its real generated business lineage:
 
-PostgreSQL analytics loader, its old runner/tests, unused credentials and migration overlay are removed. The shared SQL now runs in DuckDB; PostgreSQL remains for Superset metadata and the separate Airflow/crawler runtime. Post-cleanup Real verification passed Docker build/start, dbt, native BI import, concurrent refresh and Docs. Airflow orchestration and live crawling were not run E2E in M5. Reproducing Real requires authorized publications; Demo uses no private inputs. An independent fresh Git clone and Linux-host execution are not claimed verified.
+```powershell
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Docs business_analytics
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Action Restart
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Action Stop
+```
 
-## Data limitations
+Use the same run name, mode and configured ports for your own deployment. Four projects remain separate: `area_enrichment`, `gold_staging`, `dimensional_analytics`, `business_analytics`. Gold/Area Docs require those projects' own built artifacts; provide the optional Area root/release in `.env`. Demo only builds dimensional and business projects. Missing real artifacts produce an explicit error; lineage is not fabricated.
 
-Only the supported Khánh Hội boundary has catalog coverage. Provider area/population references retain source, year, basis and WARNING status; they are not independently verified census figures. Unknown categories/dates remain unknown. Unmatched reviews stay separate; observed review activity is not venue-opening growth. No source review text, reviewer identities, credentials, raw captures or real datasets are distributed. Source redistribution rights are separate from the code license. Sentiment, recommendation and market-wide coverage claims are outside this MVP.
+Restart checks health and the dashboard; Stop retains PostgreSQL volumes, secrets and warehouse files. Rerun Setup to start again. To start fresh safely, choose a new run name and unused ports. There is no automatic destructive reset; do not use `down -v`, remove volumes or delete publication/checkpoint files.
+
+## Verification and Monitoring handoff
+
+M5 Real `m5-real-01` passed at commit `97c7bf1`: 725 canonical records, 302 accepted links, 423 source-only, 1,027 source mappings and 10,139 logical reviews (6,942 attached / 3,197 unmatched). Seven dimensional models / 41 dbt tests passed; focused container tests were 55 PASS / 8 platform-dependent SKIP. The 20-chart/3-tab dashboard passed 27 checks before, during and after refresh, including street tiles and GRID/DETAIL; hashes/grains/reconciliation and dbt Docs passed. These are Real pilot results; the public Demo below is separately verified on invented data.
+
+Fresh-source verification, isolated from local `.env`, databases, publications and existing metadata:
+
+```powershell
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -FreshClone -RunName mentor-fresh-01 -Port 18111 -DocsPort 18112 -PostgresPort 15511
+```
+
+The manual job exports Git source plus the explicit DX files, clears inherited FNB/Compose settings, then checks first setup, stop, rerun and restart using separate paths/projects/images/volumes. It uses no host Python. Inspect `.local/mentor-verification/mentor-fresh-01/verification.json`. Logs/screenshots/databases are ignored by Git. No commit or push is performed by the runner.
+
+**Windows fresh-source workflow PASS:** `mentor-fresh-01` completed first setup, stop, rerun and restart against its checksum-verified frozen export, with the corrected resume driver. It used new metadata/warehouse paths and no private source inputs. Demo dbt passed 7 models/41 tests; fresh-image focused tests passed 55 with 9 platform-dependent skips. Browser checks passed 27/27 before, during and after refresh and after restart, with street tiles and GRID/DETAIL. Logical table hashes/counts were conserved; dbt Docs opened successfully. Environment-restore and frozen-source rejection regressions are included in 23 passing host tests. The original M5 Alidade Smooth map was subsequently restored and passed the same 27 browser checks using the shared-network localhost verifier; the frozen source and data were preserved. Linux-host execution remains NOT_VERIFIED.
+
+To continue an interrupted verification against its unchanged frozen export, repeat that command with `-ResumeFresh`. The driver checks the exported file hashes and first successful manifest, retains passed stages, and launches each remaining stage in a separate PowerShell process. It never copies changed root code into the old export or overwrites a child signature to force admission. Source/configuration changes still require a new run name for a new-source test.
+
+[Monitoring handoff](docs/MONITORING_HANDOFF.md) identifies operational databases, checkpoints, publication manifests, Airflow logs and dbt/DQ evidence. No monitoring stack is deployed.
+
+## Known limitations
+
+- Real publications, cookies, credentials and raw/review data are not distributed. Their usage/redistribution rights are separate from the code.
+- Accepted ER links are machine decisions, not human-verified ground truth. Unknown categories/dates remain unknown; unmatched reviews keep their Google identity.
+- Area/population references retain source/year/basis/WARNING status; observed density is not a full-market census.
+- The default map retains M5's light Alidade Smooth basemap with provider attribution. Local development on localhost needs no API key; the on-demand browser verifier shares Superset's network namespace to test the same loopback UI. External deployments need the provider's own domain/key configuration. Tiles require network/provider availability; localhost URLs are not a public deployment.
+- Airflow business E2E, live crawling and Linux-host setup are not verified by the BI Demo. Crawler persistence remains SQLite/file plus opt-in PostgreSQL, not PostgreSQL-only.
