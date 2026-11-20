@@ -73,22 +73,24 @@ These are catalog records, not a census. Accepted links are machine decisions, n
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 python -m pip install playwright==1.42.0
 # All builds/startup/verification below run manually and preserve checkpoints/logs.
-pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Mode Demo -RunName demo-01
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Mode Demo -RunName demo-02 -Port 18091 -PostgresPort 15436 -DocsPort 18084
 ```
 
 `.env.example` contains ports, never credentials. The new runner generates isolated secrets under `.local/duckdb-final/<run>/secrets`, never overwrites existing files and mounts them as Docker secrets. Only the Superset metadata database is provisioned; no PostgreSQL analytics tables or loader are used. Existing historical databases remain intact.
 
 The analytics Dockerfile supplies a warehouse target and `superset-duckdb`, with pinned DuckDB/duckdb-engine and a PostgreSQL driver for Superset metadata. No additional Dockerfile is needed. Demo data has 2 invented stores/4 reviews and visibly marks all catalog/review/reference metrics SYNTHETIC. It does not ship Google identities, review text or fake human decisions. Demo counts must never be presented as pilot KPIs.
 
+Demo opens at `http://127.0.0.1:18091` and its dbt Docs at `http://127.0.0.1:18084`. To inspect the real 725-record pilot, use Real mode below. Each run has its own `portfolio_admin` password file under `.local/duckdb-final/<run>/secrets/superset_admin_password`. Choose unused ports when running multiple projects; the runner's explicit port arguments select them.
+
 ### Real releases and full pipeline mode
 
 Restore authorized publications into `fnb-platform_demo_outputs`, preserving their recorded `/demo/...` paths. Business marts mount from `.local/m3/dashboard` at `/business-input`; the demographic reference mounts from `output/area-demographics-silver-v1` at `/area-input`. Keep manifests, upstream Places/Reviews manifests and pinned artifacts together. Runner defaults describe the verified local pilot; pass its named release/hash parameters for another compatible snapshot. Missing or mismatched inputs are rejected, never synthesized.
 
 ```powershell
-pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Mode Both -RunName final-01 -WithRuntime
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Mode Real -RunName m5-real-01 -Port 18092 -PostgresPort 15437 -DocsPort 18085
 ```
 
-This manual command verifies Demo and Real in separate projects, builds images, checks real pinned admission, runs dbt/tests, publishes DuckDB snapshots, imports the same 20-chart/3-tab bundle and checks the dashboard during/after a second refresh. `-WithRuntime` also builds isolated pipeline/browser/Airflow images, runs synthetic browser checks, starts Airflow and verifies three DAGs import/serialize. It never runs a live crawler or rebuilds Gold. Logs/checkpoints/results stay under `.local/duckdb-final/<run>`. Same command resumes; changed source/options require another run name.
+This manual Real-only command builds images, checks real pinned admission, runs dbt/tests, publishes DuckDB snapshots, imports the same 20-chart/3-tab bundle and checks the dashboard before/during/after a second refresh. It reuses published Gold and does not repeat Demo. Optional `-WithRuntime` also builds isolated pipeline/browser/Airflow images, runs synthetic browser checks, starts Airflow and verifies three DAGs import/serialize; it is not required for BI sign-off. Neither mode runs a live crawler or rebuilds Gold. Logs/checkpoints/results stay under `.local/duckdb-final/<run>`. Same command resumes; changed source/options require another run name.
 
 Full ingestion is separate: provide licensed source snapshots, scope/crawl limits and explicit release pins in `config/airflow/*.example.json`, and set `FNB_INPUT_ROOT` before creating the runtime. Replay entrypoint, after replacing the example with a real admitted config:
 
@@ -102,12 +104,12 @@ This package verifies offline replay, runtime/browser smoke and analytics, not l
 
 ### Developer URLs and dbt lineage
 
-Verified local endpoints: Superset **http://127.0.0.1:18089/superset/dashboard/hcmc-fnb-market-overview/**; dbt Docs **http://127.0.0.1:18081/**; Airflow with `-WithRuntime` **http://127.0.0.1:18082/**. Superset user is `portfolio_admin`; Airflow user is `demo`. Password files stay in the isolated run's secret directory. These are localhost services.
+After the commands above report PASS, Real Superset opens at **http://127.0.0.1:18092/superset/dashboard/hcmc-fnb-market-overview/** and Real dbt Docs at **http://127.0.0.1:18085/**. Demo uses 18091/18084 as described above. Airflow with `-WithRuntime` uses **http://127.0.0.1:18082/**. Superset user is `portfolio_admin`; Airflow user is `demo`. Password files stay in the isolated run's secret directory. These are localhost services.
 
 Switch docs from repository root:
 
 ```powershell
-pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -RunName final-01 -Docs business_analytics
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -RunName m5-real-01 -Docs business_analytics -Port 18092 -PostgresPort 15437 -DocsPort 18085
 ```
 
 Valid projects: `dimensional_analytics`, `business_analytics`, `gold_staging`, `area_enrichment`; they remain separate. Profiles and `FNB_WAREHOUSE_DUCKDB`/`FNB_DBT_DATABASE` are selected automatically. Docs catalog generation uses a copy of the build DB, never a writable serving snapshot. Gold/Area docs require those projects' actual build artifacts; Area discovers the checksum-pinned publication under `output/area-enrichment-staging-v1` read-only; `FNB_AREA_DBT_RELEASE` may explicitly select another mounted release. No DuckDB path/profile edits are needed. Missing artifacts produce an explicit error; no synthetic lineage substitutes for a real build.
@@ -115,20 +117,20 @@ Valid projects: `dimensional_analytics`, `business_analytics`, `gold_staging`, `
 ### Verify and stop
 
 ```powershell
-# Read .local/duckdb-final/final-01/verification.json; require actual PASS.
+# Read .local/duckdb-final/m5-real-01/verification.json; require actual PASS.
 # Rerun the identical command to resume/verify; choose a new name if source changed.
-pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Mode Both -RunName final-01 -WithRuntime
+pwsh -File .\scripts\Invoke-DuckDbPilot.ps1 -Mode Real -RunName m5-real-01 -Port 18092 -PostgresPort 15437 -DocsPort 18085
 # Stop only the isolated BI project; never delete volumes.
-docker compose --project-name fnb-duckdb-final-01 -f compose.analytics.yaml stop superset dbt-docs postgres
+docker compose --project-name fnb-duckdb-m5-real-01 -f compose.analytics.yaml stop superset dbt-docs postgres
 ```
 
 Tests use synthetic fixtures and owned temporary schemas. Install the project's test/dbt dependencies to run analytics tests explicitly; the small default pytest selection is not M5 coverage. Snapshot tests cover rejected corruption, unique grains, retained unmatched reviews, read-only access, failed-refresh rollback and concurrent processes.
 
-**Evidence:** isolated `final-02-demo` and `final-02` runs passed. Real KPIs are 725 stores, 302 accepted-linked, 423 source-only and 10,139 logical reviews (6,942 attached / 3,197 unmatched). The 7 dimensional models passed 41 dbt tests; the Demo also built the 3 business marts with 8 tests. Airflow UI/import/serialization verification is separate from a scheduled business DagRun. Local evidence is ignored by Git; logs and databases are never distributed.
+**Evidence:** public synthetic `demo-02` and Real-only `m5-real-01` passed in isolated projects. Real Gold `5d7915f7313e0da6dc10f1bb` produced 725 stores, 302 accepted-linked, 423 source-only, 1,027 source mappings and 10,139 logical reviews (6,942 attached / 3,197 unmatched). The 7 dimensional models passed 41 dbt tests; focused container regression passed 55 tests with 8 platform/browser-dependent skips. The Real browser verifier passed 27 checks before, during and after refresh, covering all 20 charts/3 tabs, street tiles and GRID/DETAIL. The second refresh reused the verified bundle/snapshot, preserving counts and logical content. Read-only checks verified table hashes, seven model grains, no Google mapping fanout and retained unmatched Google review identities. dbt Docs served the 7-model manifest and catalog successfully. Demo separately builds the 3 business marts with 8 tests; Real reuses its pinned published marts. Local evidence is ignored by Git; logs and databases are never distributed.
 
-Observed Real serving samples: Superset 251.6 MiB; metadata PostgreSQL 123 MiB; query-probe process peak 81.03 MiB. Five fresh-connection DuckDB samples per query were about 45–85 ms. Container samples are not isolated peaks; the probe includes connection open/close.
+Observed `m5-real-01` serving samples: Superset 252.1 MiB; metadata PostgreSQL 122.5 MiB; query-probe process peak 80.06 MiB. Five fresh-connection DuckDB samples per query were about 52–139 ms. Container samples are not isolated peaks; the probe includes connection open/close.
 
-PostgreSQL analytics loader, its old runner/tests, unused credentials and migration overlay are removed. Post-cleanup regression checks verify the retained native BI bundle and shared SQL. Reproducing Real requires authorized publications; Demo uses no private inputs. Linux-host execution and live crawling are not claimed verified.
+PostgreSQL analytics loader, its old runner/tests, unused credentials and migration overlay are removed. The shared SQL now runs in DuckDB; PostgreSQL remains for Superset metadata and the separate Airflow/crawler runtime. Post-cleanup Real verification passed Docker build/start, dbt, native BI import, concurrent refresh and Docs. Airflow orchestration and live crawling were not run E2E in M5. Reproducing Real requires authorized publications; Demo uses no private inputs. An independent fresh Git clone and Linux-host execution are not claimed verified.
 
 ## Data limitations
 
